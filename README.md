@@ -5,20 +5,16 @@ Este repositorio contiene:
 - Un **collector** (cuando tengas el MB160) que descarga marcajes y los inserta en SQL Server.
 - Una **API (FastAPI)** para consultar marcajes.
 
-> DB objetivo: `Bigbang 6`  
-> Tabla: `dbo.AsistenciMarcaje`  
-> Guardado: **hora local** (`EventoFechaHora`)
-
 ---
 
 ## 1) Crear tabla en SQL Server
 
 Ejecuta el script:
 
-`sql/create_AsistenciMarcaje.sql`
+`sql/create_AsistenciaMarcaje.sql`
 
 Asegúrate de que el constraint UNIQUE exista:
-`UQ_AsistenciMarcaje_Dedupe`
+`UQ_AsistenciaMarcaje_Dedupe`
 
 ---
 
@@ -30,7 +26,7 @@ Asegúrate de que el constraint UNIQUE exista:
 Ejemplo mínimo:
 - SQLSERVER_HOST
 - SQLSERVER_PORT
-- SQLSERVER_DB=Bigbang 6
+- SQLSERVER_DB=db
 - SQLSERVER_USER
 - SQLSERVER_PASSWORD
 
