@@ -8,26 +8,6 @@ Este repositorio contiene:
 
 ---
 
-## 0) Estructura del repo
-
-```
-
-mb160-service/
-api.py
-collector.py
-db.py
-health_check.py
-service_main.py
-test_db_insert.py
-requirements.txt
-.env.example
-sql/
-create_AsistenciaMarcaje.sql
-
-````
-
----
-
 ## 1) Crear tabla en SQL Server
 
 Ejecuta el script:
@@ -263,7 +243,7 @@ Logs:
 ### 7.1 Preparar carpeta
 
 Ejemplo:
-`C:\Servicios\mb160\mb160-service\`
+`C:\Servicios\mb160\mb160-api\`
 
 Clona el repo allí y crea tu `.env`.
 
@@ -272,7 +252,7 @@ Clona el repo allí y crea tu `.env`.
 PowerShell:
 
 ```powershell
-cd C:\Servicios\mb160\mb160-service
+cd C:\Servicios\mb160\mb160-api
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -280,11 +260,11 @@ pip install -r requirements.txt
 
 ### 7.3 Crear `run_service.bat`
 
-Crea `C:\Servicios\mb160\mb160-service\run_service.bat`:
+Crea `C:\Servicios\mb160\mb160-api\run_service.bat`:
 
 ```bat
 @echo off
-cd /d C:\Servicios\mb160\mb160-service
+cd /d C:\Servicios\mb160\mb160-api
 call .\.venv\Scripts\activate.bat
 python service_main.py
 ```
@@ -297,8 +277,8 @@ Descarga NSSM y descomprime en:
 ### 7.5 Crear el servicio (PowerShell como Admin)
 
 ```powershell
-C:\Tools\nssm\nssm.exe install MB160Collector "C:\Servicios\mb160\mb160-service\run_service.bat"
-C:\Tools\nssm\nssm.exe set MB160Collector AppDirectory "C:\Servicios\mb160\mb160-service"
+C:\Tools\nssm\nssm.exe install MB160Collector "C:\Servicios\mb160\mb160-api\run_service.bat"
+C:\Tools\nssm\nssm.exe set MB160Collector AppDirectory "C:\Servicios\mb160\mb160-api"
 C:\Tools\nssm\nssm.exe set MB160Collector Start SERVICE_AUTO_START
 C:\Tools\nssm\nssm.exe start MB160Collector
 ```
@@ -311,7 +291,7 @@ Get-Service MB160Collector
 
 ### 7.7 Ver logs
 
-* `C:\Servicios\mb160\mb160-service\logs\collector.log`
+* `C:\Servicios\mb160\mb160-api\logs\collector.log`
 
 ### 7.8 Detener / arrancar
 
