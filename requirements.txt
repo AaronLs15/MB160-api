@@ -1,0 +1,8 @@
+python-dotenv
+pyodbc
+sqlalchemy
+tenacity
+
+fastapi
+uvicorn
+pyzk

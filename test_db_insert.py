@@ -1,0 +1,50 @@
+from datetime import datetime
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+
+from db import build_engine, test_connection
+
+
+def main():
+    engine = build_engine()
+
+    # 1) Conexión
+    test_connection(engine)
+    print("OK: conexión a SQL Server funciona")
+
+    # 2) Insert 1
+    ts = datetime.now().replace(microsecond=0)  # DATETIME2(0)
+
+    insert_sql = text("""
+        INSERT INTO dbo.AsistenciMarcaje
+        (DispositivoSerial, DispositivoIP, UsuarioDispositivo, EventoFechaHora, Punch, Estado, WorkCode)
+        VALUES
+        (:serial, :ip, :user_id, :ts, :punch, :estado, :workcode)
+    """)
+
+    params = {
+        "serial": "TEST-SIM-001",
+        "ip": "127.0.0.1",
+        "user_id": "1001",
+        "ts": ts,
+        "punch": 0,
+        "estado": 0,
+        "workcode": None,
+    }
+
+    with engine.begin() as conn:
+        conn.execute(insert_sql, params)
+
+    print(f"OK: insert 1 realizado (ts={ts})")
+
+    # 3) Insert duplicado (debe fallar por UNIQUE)
+    try:
+        with engine.begin() as conn:
+            conn.execute(insert_sql, params)
+        print("ERROR: el duplicado se insertó; revisa el UNIQUE UQ_AsistenciMarcaje_Dedupe")
+    except IntegrityError:
+        print("OK: deduplicación funciona (IntegrityError por UNIQUE)")
+
+
+if __name__ == "__main__":
+    main()
