@@ -218,7 +218,7 @@ Obtiene un marcaje por `AsistenciaMarcajeID`.
 
 ---
 
-## 6) Correr el collector (cuando ya tengas el MB160)
+## 6) Correr el collector (ya con MB160)
 
 ### 6.1 Configurar `.env`
 
@@ -364,13 +364,3 @@ C:\Tools\nssm\nssm.exe start MB160Collector
   * Corre `python service_main.py` en consola para ver errores en pantalla
 
 ---
-
-## 10) Seguridad
-
-* No comitees `.env`
-* Usa secretos (por ejemplo, variables de entorno en la VM)
-* Revisa permisos de la cuenta SQL (INSERT/SELECT sobre dbo.AsistenciaMarcaje)
-
-```
-::contentReference[oaicite:0]{index=0}
-```
