@@ -23,7 +23,7 @@ PULL_INTERVAL_SECONDS = int(os.environ.get("PULL_INTERVAL_SECONDS", "60"))
 def _get_last_ts(dbconn, device_serial: str) -> Optional[datetime]:
     q = text("""
         SELECT MAX(EventoFechaHora) AS MaxTs
-        FROM dbo.AsistenciMarcaje
+        FROM dbo.AsistenciaMarcaje
         WHERE DispositivoSerial = :DeviceSerial
     """)
     row = dbconn.execute(q, {"DeviceSerial": device_serial}).mappings().first()
@@ -33,7 +33,7 @@ def _get_last_ts(dbconn, device_serial: str) -> Optional[datetime]:
 def _insert_mark(dbconn, *, device_serial: str, device_ip: str, user_id: str,
                  ts_local: datetime, punch: int, estado: int, workcode: Optional[int]) -> None:
     ins = text("""
-        INSERT INTO dbo.AsistenciMarcaje
+        INSERT INTO dbo.AsistenciaMarcaje
         (DispositivoSerial, DispositivoIP, UsuarioDispositivo, EventoFechaHora, Punch, Estado, WorkCode)
         VALUES
         (:DispositivoSerial, :DispositivoIP, :UsuarioDispositivo, :EventoFechaHora, :Punch, :Estado, :WorkCode)

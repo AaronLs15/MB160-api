@@ -40,7 +40,7 @@ def build_engine(settings: Optional[Settings] = None) -> Engine:
     """
     Cross-platform (macOS + Windows) SQL Server connection using ODBC + SQLAlchemy.
     Uses odbc_connect to handle:
-      - DB names with spaces (e.g., "Bigbang 6")
+      - DB names with spaces (e.g., "db_name")
       - host/port formatting
       - consistent behavior across OS
     """

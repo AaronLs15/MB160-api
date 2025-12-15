@@ -16,7 +16,7 @@ def main():
     ts = datetime.now().replace(microsecond=0)  # DATETIME2(0)
 
     insert_sql = text("""
-        INSERT INTO dbo.AsistenciMarcaje
+        INSERT INTO dbo.AsistenciaMarcaje
         (DispositivoSerial, DispositivoIP, UsuarioDispositivo, EventoFechaHora, Punch, Estado, WorkCode)
         VALUES
         (:serial, :ip, :user_id, :ts, :punch, :estado, :workcode)
@@ -41,7 +41,7 @@ def main():
     try:
         with engine.begin() as conn:
             conn.execute(insert_sql, params)
-        print("ERROR: el duplicado se insertó; revisa el UNIQUE UQ_AsistenciMarcaje_Dedupe")
+        print("ERROR: el duplicado se insertó; revisa el UNIQUE UQ_AsistenciaMarcaje_Dedupe")
     except IntegrityError:
         print("OK: deduplicación funciona (IntegrityError por UNIQUE)")
 

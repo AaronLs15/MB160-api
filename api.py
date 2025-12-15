@@ -54,7 +54,7 @@ def list_marks(
 
     q = text(f"""
         SELECT
-            AsistenciMarcajeID,
+            AsistenciaMarcajeID,
             DispositivoSerial,
             DispositivoIP,
             UsuarioDispositivo,
@@ -63,7 +63,7 @@ def list_marks(
             Estado,
             WorkCode,
             FechaRegistro
-        FROM dbo.AsistenciMarcaje
+        FROM dbo.AsistenciaMarcaje
         {where_sql}
         ORDER BY EventoFechaHora DESC
         OFFSET :offset ROWS
@@ -80,7 +80,7 @@ def list_marks(
 def get_mark(mark_id: int) -> Dict[str, Any]:
     q = text("""
         SELECT
-            AsistenciMarcajeID,
+            AsistenciaMarcajeID,
             DispositivoSerial,
             DispositivoIP,
             UsuarioDispositivo,
@@ -89,8 +89,8 @@ def get_mark(mark_id: int) -> Dict[str, Any]:
             Estado,
             WorkCode,
             FechaRegistro
-        FROM dbo.AsistenciMarcaje
-        WHERE AsistenciMarcajeID = :id
+        FROM dbo.AsistenciaMarcaje
+        WHERE AsistenciaMarcajeID = :id
     """)
     with engine.connect() as conn:
         row = conn.execute(q, {"id": mark_id}).mappings().first()

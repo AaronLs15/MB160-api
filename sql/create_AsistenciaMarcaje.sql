@@ -1,4 +1,4 @@
-USE [Bigbang];
+USE [BigbangERP];
 GO
 
 IF OBJECT_ID(N'dbo.AsistenciaMarcaje', N'U') IS NULL
