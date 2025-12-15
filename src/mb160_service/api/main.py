@@ -1,14 +1,11 @@
-import os
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException
 from sqlalchemy import text
 
-from db import build_engine, test_connection
-
-load_dotenv()
+from mb160_service.config import get_api_settings, get_db_settings
+from mb160_service.db import build_engine, test_connection
 
 app = FastAPI(
     title="MB160 Attendance Service",
@@ -16,13 +13,15 @@ app = FastAPI(
     description="API para consultar marcajes insertados desde dispositivos ZKTeco (MB160) hacia SQL Server.",
 )
 
-engine = build_engine()
+api_settings = get_api_settings()
+db_settings = get_db_settings()
+engine = build_engine(db_settings)
 
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
     test_connection(engine)
-    return {"status": "ok", "db": os.environ.get("SQLSERVER_DB")}
+    return {"status": "ok", "db": db_settings.database}
 
 
 @app.get("/marks", response_model=list[dict])
@@ -102,6 +101,5 @@ def get_mark(mark_id: int) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # Dev runner: python api.py
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=int(os.environ.get("API_PORT", "8000")), reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=api_settings.port, reload=True)

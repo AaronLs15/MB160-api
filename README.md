@@ -1,37 +1,136 @@
-```md
 # MB160 Service (SQL Server + Collector + API)
 
-Este repositorio contiene:
-- Un **test** de conectividad e integridad a SQL Server (dedupe) sin necesidad del MB160.
-- Un **collector** (cuando tengas el MB160) que descarga marcajes y los inserta en SQL Server.
-- Una **API (FastAPI)** para consultar marcajes.
+Incluye:
+- Tests rápidos de conectividad/dedupe a SQL Server sin MB160.
+- Collector que descarga marcajes del MB160 y los inserta en SQL Server (hora local) + lookup de nombre.
+- Worker de sincronización de usuarios (cola + trigger en `dbo.Personal`).
+- API (FastAPI) para consultar marcajes.
+
+## Estructura rápida
+
+```
+.
+├── src/mb160_service/
+│   ├── api/main.py              # FastAPI app
+│   ├── collector/poller.py      # descarga marcajes MB160
+│   ├── collector/user_sync.py   # crea/actualiza usuarios en MB160
+│   ├── config.py                # settings desde .env
+│   ├── db.py                    # SQLAlchemy engine helper
+│   ├── logging.py               # logger común
+│   └── utils/simulator.py
+├── scripts/
+│   ├── run_api.py
+│   ├── run_collector.py
+│   ├── run_health_check.py
+│   └── run_live_ingest.py       # opcional: prueba live_capture
+├── sql/
+│   ├── create_AsistenciaMarcaje.sql
+│   ├── create_MB160UserSyncQueue.sql
+│   └── create_trigger_Personal_MB160_Queue.sql
+├── tests/
+│   └── test_db_insert.py (+ pruebas MB160_*)
+└── logs/ (gitignored)
+```
 
 ---
 
-## 1) Crear tabla en SQL Server
+## 1) SQL Server
 
-Ejecuta el script:
+### 1.1 Tabla de marcajes
+Ejecuta `sql/create_AsistenciaMarcaje.sql`
 
-`sql/create_AsistenciaMarcaje.sql`
+Asegúrate de que exista el UNIQUE para dedupe: `UQ_AsistenciaMarcaje_Dedupe`.
 
-Asegúrate de que el constraint UNIQUE exista (dedupe):
-`UQ_AsistenciaMarcaje_Dedupe`
+### 1.2 Agregar `UsuarioNombre` a marcajes (si aún no existe)
+
+```sql
+ALTER TABLE dbo.AsistenciaMarcaje
+ADD UsuarioNombre NVARCHAR(150) NULL;
+GO
+```
+
+### 1.3 Cola para alta automática de usuarios en MB160
+
+```sql
+IF OBJECT_ID(N'dbo.MB160UserSyncQueue', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.MB160UserSyncQueue
+    (
+        MB160UserSyncQueueID BIGINT IDENTITY(1,1) NOT NULL,
+        EmpresaID            INT NOT NULL,
+        PersonaID            INT NOT NULL,
+        UsuarioDispositivo   NVARCHAR(50) NOT NULL,
+        UsuarioNombre        NVARCHAR(150) NOT NULL,
+
+        Estatus              TINYINT NOT NULL CONSTRAINT DF_MB160UserSyncQueue_Estatus DEFAULT(0),
+        -- 0=Pendiente, 1=Procesando, 2=Hecho, 3=Error
+
+        Intentos             INT NOT NULL CONSTRAINT DF_MB160UserSyncQueue_Intentos DEFAULT(0),
+        UltimoError          NVARCHAR(4000) NULL,
+
+        FechaRegistro        DATETIME2(3) NOT NULL CONSTRAINT DF_MB160UserSyncQueue_FechaRegistro DEFAULT(SYSDATETIME()),
+        UltimoCambio         DATETIME2(3) NOT NULL CONSTRAINT DF_MB160UserSyncQueue_UltimoCambio DEFAULT(SYSDATETIME()),
+        ProcesadoEn          DATETIME2(3) NULL,
+
+        CONSTRAINT PK_MB160UserSyncQueue PRIMARY KEY CLUSTERED (MB160UserSyncQueueID),
+        CONSTRAINT UQ_MB160UserSyncQueue UNIQUE (EmpresaID, PersonaID)
+    );
+
+    CREATE INDEX IX_MB160UserSyncQueue_Estatus
+    ON dbo.MB160UserSyncQueue (Estatus, MB160UserSyncQueueID);
+END;
+GO
+```
+
+### 1.4 Trigger en `dbo.Personal` para encolar alta en MB160
+
+```sql
+CREATE OR ALTER TRIGGER dbo.tr_Personal_MB160_Queue
+ON dbo.Personal
+AFTER INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    ;WITH src AS (
+        SELECT
+            i.Empresa,
+            i.Personal,
+            CONCAT(CAST(i.Nombre AS NVARCHAR(150)) + ' ', isnull(i.ApellidoPaterno,'') + ' ', ISNULL(i.ApellidoMaterno,'')  ) AS UsuarioNombre,
+            RIGHT(REPLICATE('0', 3) + CAST(i.Empresa AS VARCHAR(10)), 3)
+            + RIGHT(REPLICATE('0', 6) + CAST(i.Personal AS VARCHAR(10)), 6) AS UsuarioDispositivo
+        FROM inserted i
+        WHERE i.Empresa IS NOT NULL
+          AND i.Personal IS NOT NULL
+          AND NULLIF(LTRIM(RTRIM(i.Nombre)), '') IS NOT NULL
+    )
+    MERGE dbo.MB160UserSyncQueue AS t
+    USING src AS s
+      ON t.EmpresaID = s.Empresa AND t.PersonaID = s.Personal
+    WHEN MATCHED THEN
+      UPDATE SET
+        t.UsuarioDispositivo = s.UsuarioDispositivo,
+        t.UsuarioNombre = s.UsuarioNombre,
+        t.Estatus = 0,
+        t.UltimoError = NULL,
+        t.UltimoCambio = SYSDATETIME(),
+        t.ProcesadoEn = NULL
+    WHEN NOT MATCHED THEN
+      INSERT (EmpresaID, PersonaID, UsuarioDispositivo, UsuarioNombre)
+      VALUES (s.Empresa, s.Personal, s.UsuarioDispositivo, s.UsuarioNombre);
+END;
+GO
+```
 
 ---
 
-## 2) Configurar variables de entorno
+## 2) Variables de entorno
 
-1. Copia `.env.example` a `.env`
-2. Llena tus credenciales (**NO comitear** `.env`)
+1. Copia `.env.example` a `.env` (no comitear).
+2. Llena credenciales.
 
-**Ejemplo mínimo**
-- `SQLSERVER_HOST`
-- `SQLSERVER_PORT`
-- `SQLSERVER_DB=db_name`
-- `SQLSERVER_USER`
-- `SQLSERVER_PASSWORD`
+Ejemplo completo:
 
-**Ejemplo completo** (`.env`)
 ```env
 # ---- SQL Server ----
 SQLSERVER_HOST=10.20.30.40
@@ -44,28 +143,28 @@ SQLSERVER_DRIVER=ODBC Driver 18 for SQL Server
 SQLSERVER_ENCRYPT=yes
 SQLSERVER_TRUST_CERT=yes
 
-# ---- MB160 (cuando ya lo tengas) ----
+# ---- MB160 ----
 MB160_IP=192.168.1.50
 MB160_PORT=4370
+
+# ---- Attendance collector ----
 PULL_INTERVAL_SECONDS=60
+
+# ---- User sync worker ----
+USER_SYNC_INTERVAL_SECONDS=10
+USER_SYNC_BATCH_SIZE=20
 
 # ---- API ----
 API_PORT=8000
-````
+```
 
-> **VPN:** si tu SQL Server está en una red remota, asegúrate de que la VPN esté conectada antes de correr tests/servicio/API.
+> VPN: si el SQL Server está en red remota, conecta la VPN antes de correr pruebas/servicio/API.
 
 ---
 
-## 3) Probar en macOS (sin MB160)
+## 3) Instalación y smoke tests (macOS / Windows)
 
-### Requisitos
-
-* VPN conectada hacia la red donde vive SQL Server
-* Python 3.11+
-* ODBC Driver 18 para SQL Server (`msodbcsql18`)
-
-### Instalar ODBC Driver (macOS con brew)
+Requisitos: Python 3.11+, ODBC Driver 18 para SQL Server. En macOS instala con brew:
 
 ```bash
 brew update
@@ -75,7 +174,7 @@ brew update
 brew install msodbcsql18
 ```
 
-### Crear venv e instalar dependencias
+Crear venv e instalar deps (macOS/Linux):
 
 ```bash
 python3 -m venv .venv
@@ -83,37 +182,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Smoke test: conexión a DB
-
-```bash
-python health_check.py
-```
-
-### Test DB + dedupe (Opción 2)
-
-```bash
-python test_db_insert.py
-```
-
-Salida esperada:
-
-* `OK: conexión a SQL Server funciona`
-* `OK: insert 1 realizado`
-* `OK: deduplicación funciona (IntegrityError por UNIQUE)`
-
----
-
-## 4) Probar en Windows (sin MB160)
-
-### Requisitos
-
-* VPN conectada
-* Python 3.11+ (marcar “Add Python to PATH”)
-* Microsoft **ODBC Driver 18 for SQL Server** instalado
-
-### Crear venv e instalar dependencias
-
-PowerShell:
+En Windows (PowerShell):
 
 ```powershell
 py -m venv .venv
@@ -121,135 +190,75 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
-### Smoke test: conexión a DB
+Smoke tests (con `.env` listo):
 
-```powershell
-python health_check.py
+```bash
+python scripts/run_health_check.py
+python tests/test_db_insert.py
 ```
 
-### Test DB + dedupe
+Salida esperada:
 
-```powershell
-python test_db_insert.py
-```
+* `OK: DB=...`
+* `OK: insert 1 realizado`
+* `OK: deduplicación funciona (IntegrityError por UNIQUE)`
 
 ---
 
-## 5) Correr la API (FastAPI)
+## 4) API (FastAPI)
 
-### Instalar dependencias
-
-(ya incluidas en `requirements.txt`)
-
-### Ejecutar API en modo dev
-
-macOS o Windows:
+Dev server:
 
 ```bash
-python api.py
+python scripts/run_api.py
 ```
 
 Por defecto:
 
-* API: `http://localhost:8000`
-* Swagger UI: `http://localhost:8000/docs`
+* API: http://localhost:8000
+* Swagger UI: http://localhost:8000/docs
 
-> Si quieres cambiar el puerto, ajusta `API_PORT` en `.env`.
+### Endpoints
 
-### Endpoints disponibles
-
-#### `GET /health`
-
-Verifica conectividad a SQL Server.
-**Respuesta**:
-
-```json
-{ "status": "ok", "db": "db_name" }
-```
-
-#### `GET /marks`
-
-Lista marcajes (paginado) con filtros opcionales.
-
-**Query params:**
-
-* `user_id` → `UsuarioDispositivo` (enroll / user_id del reloj)
-* `device_serial` → `DispositivoSerial`
-* `dt_from` → desde (datetime ISO, hora local)
-* `dt_to` → hasta (datetime ISO, hora local)
-* `limit` → 1..2000 (default 200)
-* `offset` → >=0 (default 0)
-
-**Ejemplos**
-
-* Últimos 50 marcajes:
-
-  * `/marks?limit=50`
-* Marcajes del usuario 1001:
-
-  * `/marks?user_id=1001&limit=100`
-* Rango de fechas:
-
-  * `/marks?dt_from=2025-12-01T00:00:00&dt_to=2025-12-02T23:59:59&limit=200`
-
-#### `GET /marks/{mark_id}`
-
-Obtiene un marcaje por `AsistenciaMarcajeID`.
+* `GET /health` → verifica conectividad a SQL Server
+* `GET /marks` → lista marcajes con filtros `user_id`, `device_serial`, `dt_from`, `dt_to`, `limit`, `offset`
+* `GET /marks/{mark_id}` → obtiene un marcaje por `AsistenciaMarcajeID`
 
 ---
 
-## 6) Correr el collector (ya con MB160)
+## 5) Collector + user sync (dev)
 
-### 6.1 Configurar `.env`
-
-Asegúrate de tener:
-
-* `MB160_IP`
-* `MB160_PORT` (default 4370)
-* `PULL_INTERVAL_SECONDS` (default 60)
-
-Ejemplo:
-
-```env
-MB160_IP=192.168.1.50
-MB160_PORT=4370
-PULL_INTERVAL_SECONDS=60
-```
-
-### 6.2 Ejecutar collector en consola (dev)
+Ejecuta ambos workers en paralelo (descarga marcajes + crea usuarios en MB160):
 
 ```bash
-python service_main.py
+python scripts/run_collector.py
 ```
 
-Logs:
+Logs: `logs/service.log`
 
-* `logs/collector.log`
+¿Qué hace?
 
-### 6.3 ¿Qué hace el collector?
-
-* Se conecta al MB160 por TCP/IP
-* Descarga los marcajes (`get_attendance()`)
-* Inserta en `dbo.AsistenciaMarcaje` usando `EventoFechaHora` en **hora local**
-* Deduplica por el UNIQUE `UQ_AsistenciaMarcaje_Dedupe`
-* Corre en loop cada `PULL_INTERVAL_SECONDS`
+* Conecta al MB160 (TCP/IP)
+* Descarga marcajes (`get_attendance()`), inserta en `dbo.AsistenciaMarcaje` (hora local) y deduplica por `UQ_AsistenciaMarcaje_Dedupe`
+* En user sync: lee pendientes en `dbo.MB160UserSyncQueue` y llama `set_user()` en el MB160 con `UsuarioDispositivo` y `UsuarioNombre`
 
 ---
 
-## 7) Instalar el collector como Servicio en Windows (NSSM)
+## 6) Live capture opcional
 
-> Recomendado para correr 24/7 en una VM.
+Para escuchar eventos en vivo mientras pruebas el dispositivo:
 
-### 7.1 Preparar carpeta
+```bash
+python scripts/run_live_ingest.py
+```
 
-Ejemplo:
-`C:\Servicios\mb160\mb160-api\`
+---
 
-Clona el repo allí y crea tu `.env`.
+## 7) Instalar como servicio en Windows (NSSM)
 
-### 7.2 Crear venv e instalar deps
+1) Carpeta: `C:\Servicios\mb160\mb160-api\` (clona repo y crea `.env`).
 
-PowerShell:
+2) venv + deps (PowerShell):
 
 ```powershell
 cd C:\Servicios\mb160\mb160-api
@@ -258,89 +267,60 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 7.3 Crear `run_service.bat`
-
-Crea `C:\Servicios\mb160\mb160-api\run_service.bat`:
+3) Crea `run_service.bat`:
 
 ```bat
 @echo off
 cd /d C:\Servicios\mb160\mb160-api
 call .\.venv\Scripts\activate.bat
-python service_main.py
+python scripts\run_collector.py
 ```
 
-### 7.4 Instalar NSSM
-
-Descarga NSSM y descomprime en:
-`C:\Tools\nssm\`
-
-### 7.5 Crear el servicio (PowerShell como Admin)
+4) Instala NSSM y registra servicio (PowerShell admin):
 
 ```powershell
-C:\Tools\nssm\nssm.exe install MB160Collector "C:\Servicios\mb160\mb160-api\run_service.bat"
-C:\Tools\nssm\nssm.exe set MB160Collector AppDirectory "C:\Servicios\mb160\mb160-api"
-C:\Tools\nssm\nssm.exe set MB160Collector Start SERVICE_AUTO_START
-C:\Tools\nssm\nssm.exe start MB160Collector
+C:\Tools\nssm\nssm.exe install MB160Service "C:\Servicios\mb160\mb160-api\run_service.bat"
+C:\Tools\nssm\nssm.exe set MB160Service AppDirectory "C:\Servicios\mb160\mb160-api"
+C:\Tools\nssm\nssm.exe set MB160Service Start SERVICE_AUTO_START
+C:\Tools\nssm\nssm.exe start MB160Service
 ```
 
-### 7.6 Verificar estado
+5) Verifica estado: `Get-Service MB160Service`
 
-```powershell
-Get-Service MB160Collector
-```
+6) Logs: `C:\Servicios\mb160\mb160-api\logs\service.log`
 
-### 7.7 Ver logs
-
-* `C:\Servicios\mb160\mb160-api\logs\collector.log`
-
-### 7.8 Detener / arrancar
-
-```powershell
-C:\Tools\nssm\nssm.exe stop MB160Collector
-C:\Tools\nssm\nssm.exe start MB160Collector
-```
-
-### Nota VPN (importante)
-
-* El servicio requiere que la VPN esté activa para llegar a SQL Server.
-* Si la VPN se cae, el collector puede fallar temporalmente; al volver la VPN, se recupera.
-* Ideal: configurar VPN “Always On”/auto-connect en la VM.
+> El servicio necesita VPN activa si SQL Server está en red remota.
 
 ---
 
-## 8) Operación recomendada (uso completo)
+## 8) Operación recomendada
 
-1. Ejecuta el SQL para crear tabla en `base de datos`
-2. Configura `.env` (SQL + VPN)
-3. Corre `health_check.py`
-4. Corre `test_db_insert.py` (dedupe)
-5. Corre `api.py` (consulta marcajes)
-6. (Con MB160) corre `service_main.py` para empezar a poblar `dbo.AsistenciaMarcaje`
-7. En VM Windows, instala NSSM y deja `MB160Collector` como servicio
+1. Crear tabla de marcajes (+ columna `UsuarioNombre`).
+2. Crear cola `MB160UserSyncQueue` y trigger en `dbo.Personal`.
+3. Configurar `.env` (SQL + MB160 + VPN).
+4. `python scripts/run_health_check.py`
+5. `python tests/test_db_insert.py`
+6. `python scripts/run_api.py`
+7. `python scripts/run_collector.py` (pobla `dbo.AsistenciaMarcaje` y crea usuarios en MB160)
+8. En VM Windows, instalar NSSM y dejar `MB160Service` como servicio.
 
 ---
 
 ## 9) Troubleshooting rápido
 
-* **No conecta a SQL Server**
-
-  * Verifica VPN
-  * Verifica `SQLSERVER_HOST` y `SQLSERVER_PORT`
-  * Verifica firewall y que SQL acepte SQL Auth
-
-* **Problemas de certificado**
-
-  * Para entorno interno: `SQLSERVER_ENCRYPT=yes` y `SQLSERVER_TRUST_CERT=yes`
-  * Para cert válido: `SQLSERVER_TRUST_CERT=no`
-
-* **El test de dedupe no falla en el duplicado**
-
-  * Asegúrate de que exista `UQ_AsistenciaMarcaje_Dedupe`
-  * Asegúrate de que el test inserte exactamente los mismos campos del UNIQUE
-
-* **No hay logs**
-
-  * Revisa que exista carpeta `logs/`
-  * Corre `python service_main.py` en consola para ver errores en pantalla
+* **No conecta a SQL Server:** verifica VPN, `SQLSERVER_HOST/PORT`, firewall, SQL Auth.
+* **Problemas de certificado:** para entorno interno usa `SQLSERVER_ENCRYPT=yes` y `SQLSERVER_TRUST_CERT=yes`.
+* **El dedupe no falla en el duplicado:** confirma que exista `UQ_AsistenciaMarcaje_Dedupe` y que el test inserte los mismos campos del UNIQUE.
+* **User sync no crea usuarios:** revisa que el trigger exista y que `dbo.MB160UserSyncQueue` tenga filas; checa `UltimoError`.
+* **Sin logs de asistencia:** confirma que el MB160 tenga registros (`get_attendance()` > 0) o haz un marcaje manual.
 
 ---
+
+## 10) Valores de estatus (AttState típicos)
+
+* 0 = Check-In
+* 1 = Check-Out
+* 2 = Break-Out
+* 3 = Break-In
+* 4 = OT-In
+* 5 = OT-Out
