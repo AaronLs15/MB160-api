@@ -1,17 +1,25 @@
-import os
 import time
 import logging
-from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from db import build_engine
+import sys
+from pathlib import Path
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-IP = os.environ.get("MB160_IP", "192.168.2.13")
-PORT = int(os.environ.get("MB160_PORT", "4370"))
+import bootstrap
+bootstrap.add_src_to_path()
+
+from mb160_service.config import get_device_settings
+from mb160_service.db import build_engine
+from mb160_service.logging import setup_logging
+
+device_settings = get_device_settings()
+IP = device_settings.ip or "192.168.2.13"
+PORT = device_settings.port
 
 def insert_mark(dbconn, device_serial, device_ip, evt):
     ts = getattr(evt, "timestamp", None)
@@ -19,7 +27,7 @@ def insert_mark(dbconn, device_serial, device_ip, evt):
         return False
 
     sql = text("""
-        INSERT INTO dbo.AsistenciMarcaje
+        INSERT INTO dbo.AsistenciaMarcaje
         (DispositivoSerial, DispositivoIP, UsuarioDispositivo, EventoFechaHora, Punch, Estado, WorkCode)
         VALUES
         (:serial, :ip, :user_id, :ts, :punch, :estado, :workcode)
@@ -44,6 +52,7 @@ def insert_mark(dbconn, device_serial, device_ip, evt):
 def main():
     from zk import ZK
 
+    setup_logging()
     engine = build_engine()
     zk = ZK(IP, port=PORT, timeout=10, password=0)
     conn = zk.connect()

@@ -1,6 +1,3 @@
-USE [BigbangERP];
-GO
-
 IF OBJECT_ID(N'dbo.AsistenciaMarcaje', N'U') IS NULL
 BEGIN
     CREATE TABLE dbo.AsistenciaMarcaje
@@ -34,10 +31,14 @@ BEGIN
         )
     );
 
-    CREATE INDEX IX_AsistenciMarcaje_Usuario_Fecha
+    CREATE INDEX IX_AsistenciaMarcaje_Usuario_Fecha
         ON dbo.AsistenciaMarcaje (UsuarioDispositivo, EventoFechaHora DESC);
 
-    CREATE INDEX IX_AsistenciMarcaje_Device_Fecha
+    CREATE INDEX IX_AsistenciaMarcaje_Device_Fecha
         ON dbo.AsistenciaMarcaje (DispositivoSerial, EventoFechaHora DESC);
 END;
+GO
+
+ALTER TABLE dbo.AsistenciaMarcaje
+ADD UsuarioNombre NVARCHAR(150) NULL;
 GO
