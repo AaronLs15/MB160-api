@@ -21,6 +21,8 @@ Incluye:
 ├── scripts/
 │   ├── run_api.py
 │   ├── run_collector.py
+│   ├── run_daily_pull.py       # ejecuta un pull unico (para cron)
+│   ├── run_scheduled_pull.py   # scheduler diario con bajo consumo
 │   ├── run_health_check.py
 │   └── run_live_ingest.py       # opcional: prueba live_capture
 ├── sql/
@@ -244,6 +246,45 @@ Logs: `logs/service.log`
 
 ---
 
+## 5.1) Ejecucion programada diaria (8pm)
+
+Si no quieres el collector corriendo todo el tiempo, usa el runner de una sola ejecucion:
+
+```bash
+python scripts/run_daily_pull.py
+```
+
+Linux/macOS (cron):
+
+```bash
+crontab -e
+# Agrega (reemplaza RUTA_REPO):
+0 20 * * * cd /RUTA_REPO && /RUTA_REPO/.venv/bin/python scripts/run_daily_pull.py >> logs/daily_pull.log 2>&1
+```
+
+Windows (Task Scheduler):
+
+* Program/script: `C:\RUTA_REPO\.venv\Scripts\python.exe`
+* Add arguments: `scripts\run_daily_pull.py`
+* Start in: `C:\RUTA_REPO`
+* Trigger: diario 20:00
+
+Servicio residente con bajo consumo (Windows):
+
+```bash
+python scripts/run_scheduled_pull.py
+```
+
+Este scheduler duerme hasta la hora configurada y solo abre conexiones cuando toca el pull.
+Si quieres cambiar la hora, usa en `.env`:
+
+```env
+DAILY_PULL_HOUR=20
+DAILY_PULL_MINUTE=0
+```
+
+---
+
 ## 6) Live capture opcional
 
 Para escuchar eventos en vivo mientras pruebas el dispositivo:
@@ -267,13 +308,17 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
-3) Crea `run_service.bat`:
+3) Crea `run_service.bat` (elige una opcion):
 
 ```bat
 @echo off
 cd /d C:\Servicios\mb160\mb160-api
 call .\.venv\Scripts\activate.bat
-python scripts\run_collector.py
+REM Opcion A: servicio 24/7 (collector + user sync)
+REM python scripts\run_collector.py
+
+REM Opcion B: servicio diario con bajo consumo (solo pull)
+python scripts\run_scheduled_pull.py
 ```
 
 4) Instala NSSM y registra servicio (PowerShell admin):
@@ -301,7 +346,7 @@ C:\Tools\nssm\nssm.exe start MB160Service
 4. `python scripts/run_health_check.py`
 5. `python tests/test_db_insert.py`
 6. `python scripts/run_api.py`
-7. `python scripts/run_collector.py` (pobla `dbo.AsistenciaMarcaje` y crea usuarios en MB160)
+7. `python scripts/run_collector.py` (24/7) o `python scripts/run_scheduled_pull.py` (diario 20:00)
 8. En VM Windows, instalar NSSM y dejar `MB160Service` como servicio.
 
 ---
