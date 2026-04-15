@@ -172,16 +172,15 @@ BEGIN
 
             -- ------------------------------------------------------------------
             -- 3b. INSERT en AsisteD
-            --     Renglon: número de línea por documento. Cada Asiste que
-            --     creamos tiene exactamente 1 línea de AsisteD, por lo que
-            --     siempre es 1. Se calcula con MAX(Renglon)+1 para seguridad
-            --     en caso de reintento que ya haya insertado parcialmente.
+            --     Renglon: consecutivo GLOBAL de toda la tabla AsisteD
+            --     (no es por documento). Se toma MAX(Renglon)+1 sin filtro.
+            --     Personal: UsuarioDispositivo completo como INT
+            --     (relación: AsistenciaMarcaje.UsuarioDispositivo = AsisteD.Personal)
             -- ------------------------------------------------------------------
             SET @SQL = N'
                 DECLARE @renglon INT;
                 SELECT @renglon = ISNULL(MAX(Renglon), 0) + 1
-                FROM [' + @DB + N'].dbo.AsisteD
-                WHERE ID = @AsisteID;
+                FROM [' + @DB + N'].dbo.AsisteD;  -- global, sin filtro por ID
 
                 INSERT INTO [' + @DB + N'].dbo.AsisteD
                 (

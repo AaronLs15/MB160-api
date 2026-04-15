@@ -5,20 +5,22 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    -- Formato real de UsuarioDispositivo: primer dígito = empresa, resto = PersonaID
-    -- Ejemplos: '50076' → empresa 5 (cotailordev), PersonaID 76
-    --           '212345' → empresa 2 (kingv7), PersonaID 12345
+    -- Formato de UsuarioDispositivo: primer dígito = empresa, valor completo = Personal en AsisteD
+    -- Ejemplos: '50076' → empresa 5 (cotailordev), Personal = 50076
+    --           '337'   → empresa 3 (obsidianav7),  Personal = 337
+    --
+    -- La relación con el ERP es: AsistenciaMarcaje.UsuarioDispositivo = AsisteD.Personal
+    -- Por eso PersonaID guarda el UsuarioDispositivo completo convertido a INT.
     --
     -- Solo se encolan Punch válidos: 0=Entrada, 1=Salida, 4=Comida.
-    -- El JOIN con EmpresaConfig filtra empresas desconocidas o inactivas.
 
     INSERT INTO dbo.MarcajeDispatchQueue
         (AsistenciaMarcajeID, EmpresaID, BaseDatos, PersonaID, Punch, EventoFechaHora)
     SELECT
         i.AsistenciaMarcajeID,
-        CAST(LEFT(i.UsuarioDispositivo, 1) AS INT)                          AS EmpresaID,
+        CAST(LEFT(i.UsuarioDispositivo, 1) AS INT)   AS EmpresaID,
         ec.BaseDatos,
-        CAST(SUBSTRING(i.UsuarioDispositivo, 2, LEN(i.UsuarioDispositivo))  AS INT) AS PersonaID,
+        CAST(i.UsuarioDispositivo AS INT)            AS PersonaID,  -- ← valor completo
         i.Punch,
         i.EventoFechaHora
     FROM inserted i
@@ -26,7 +28,7 @@ BEGIN
         ON  ec.EmpresaPrefix = LEFT(i.UsuarioDispositivo, 1)
         AND ec.Activo = 1
     WHERE i.Punch IN (0, 1, 4)
-      AND LEN(i.UsuarioDispositivo) >= 2     -- al menos 1 dígito empresa + 1 de PersonaID
-      AND ISNUMERIC(i.UsuarioDispositivo) = 1;  -- descartar IDs no numéricos
+      AND LEN(i.UsuarioDispositivo) >= 2
+      AND ISNUMERIC(i.UsuarioDispositivo) = 1;
 END;
 GO

@@ -266,12 +266,13 @@ BEGIN
             IF @AsisteID IS NULL
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL — verificar si Asiste.ID se genera en el INSERT.', 16, 1);
 
-            -- INSERT AsisteD — Renglon es NOT NULL, no es IDENTITY.
-            -- MAX(Renglon)+1 garantiza unicidad si hubiera un reintento parcial.
+            -- INSERT AsisteD
+            -- Renglon: consecutivo GLOBAL de toda AsisteD (no por documento).
+            -- Personal: UsuarioDispositivo completo como INT (= AsistenciaMarcaje.UsuarioDispositivo).
             SET @SQL = N'
                 DECLARE @renglon INT;
                 SELECT @renglon = ISNULL(MAX(Renglon), 0) + 1
-                FROM [' + @DB + N'].dbo.AsisteD WHERE ID = @AsisteID;
+                FROM [' + @DB + N'].dbo.AsisteD;  -- global, sin filtro por ID
 
                 INSERT INTO [' + @DB + N'].dbo.AsisteD
                 (ID, Renglon, Personal, Registro, HoraRegistro, FechaD, FechaA, Fecha, Sucursal,

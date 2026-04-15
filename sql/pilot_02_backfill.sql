@@ -29,8 +29,8 @@ SET @FechaHasta = ISNULL(@FechaHasta, SYSDATETIME());
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Cuántos registros hay en el rango ANTES de encolar (info)
 -- ─────────────────────────────────────────────────────────────────────────────
--- Formato real: primer dígito = empresa ('5' = cotailordev), resto = PersonaID
--- Ejemplo: '50076' → empresa 5 (cotailordev), PersonaID 76
+-- Formato real: primer dígito = empresa ('5' = cotailordev), UsuarioDispositivo completo = Personal
+-- Ejemplo: '50076' → empresa 5 (cotailordev), Personal = 50076 en AsisteD
 SELECT
     Punch,
     CASE Punch WHEN 0 THEN 'Entrada' WHEN 1 THEN 'Salida' WHEN 4 THEN 'Comida' ELSE 'Ignorado' END AS Tipo,
@@ -52,7 +52,7 @@ SELECT
     am.AsistenciaMarcajeID,
     CAST(LEFT(am.UsuarioDispositivo, 1) AS INT)                              AS EmpresaID,
     ec.BaseDatos,
-    CAST(SUBSTRING(am.UsuarioDispositivo, 2, LEN(am.UsuarioDispositivo)) AS INT) AS PersonaID,
+    CAST(am.UsuarioDispositivo AS INT)                                           AS PersonaID,
     am.Punch,
     am.EventoFechaHora
 FROM dbo.AsistenciaMarcaje am
