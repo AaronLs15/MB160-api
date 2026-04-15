@@ -161,7 +161,7 @@ BEGIN
                 OUTPUT INSERTED.ID INTO @ids
                 VALUES
                 (@EmpresaCode, ''Registro'', CAST(@Fecha AS DATE), CAST(@Fecha AS DATE),
-                 ''SIN AFECTAR'', ''INTELISIS'', YEAR(@Fecha), MONTH(@Fecha), SYSDATETIME(),
+                 ''SINAFECTAR'', ''INTELISIS'', YEAR(@Fecha), MONTH(@Fecha), SYSDATETIME(),
                  1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
                 SELECT @AsisteID = ID FROM @ids;';
             SET @Params = N'@EmpresaCode NVARCHAR(50), @Fecha DATETIME2(0), @AsisteID INT OUTPUT';
@@ -170,11 +170,7 @@ BEGIN
             IF @AsisteID IS NULL
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL.', 16, 1);
 
-            -- spAfectar genera MovID y pone Estatus=AFECTADO
-            SET @SQL = N'EXEC [' + @DB + N'].dbo.spAfectar ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'', NULL, ''INTELISIS'', @Estacion=1, @ensilencio=1;';
-            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID=@AsisteID;
-
-            -- INSERT AsisteD después de spAfectar (ID=@AsisteID no cambia tras afectar)
+            -- INSERT AsisteD antes de spAfectar (requerido por spAfectar)
             SET @SQL = N'
                 DECLARE @renglon INT;
                 SELECT @renglon = ISNULL(MAX(Renglon), 0) + 1 FROM [' + @DB + N'].dbo.AsisteD;
@@ -187,6 +183,10 @@ BEGIN
                  0, 0, 0, 0, 0);';
             SET @Params = N'@AsisteID INT, @PersonaID INT, @TipoReg NVARCHAR(20), @Hora NCHAR(5), @Fecha DATETIME2(0)';
             EXEC sp_executesql @SQL, @Params, @AsisteID=@AsisteID, @PersonaID=@PersonaID, @TipoReg=@TipoRegistro, @Hora=@HoraStr, @Fecha=@FechaEvento;
+
+            -- spAfectar genera MovID y pone Estatus='PROCESAR' (estado final esperado)
+            SET @SQL = N'EXEC [' + @DB + N'].dbo.spAfectar ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'', NULL, ''INTELISIS'', @Estacion=1, @ensilencio=1;';
+            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID=@AsisteID;
 
             UPDATE dbo.MarcajeDispatchQueue
             SET Estatus=2, AsisteID=@AsisteID, ProcesadoEn=SYSDATETIME(), UltimoError=NULL, UltimoCambio=SYSDATETIME()

@@ -171,7 +171,7 @@ BEGIN
                 (
                     @EmpresaCode, ''Registro'',
                     CAST(@Fecha AS DATE), CAST(@Fecha AS DATE),
-                    ''SIN AFECTAR'', ''INTELISIS'',
+                    ''SINAFECTAR'', ''INTELISIS'',
                     YEAR(@Fecha), MONTH(@Fecha),
                     SYSDATETIME(),
                     1, 0,
@@ -193,22 +193,8 @@ BEGIN
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL — revisar si Asiste.ID es generado correctamente.', 16, 1);
 
             -- ------------------------------------------------------------------
-            -- 3b. Afectar el movimiento en el ERP
-            --     spAfectar genera MovID (folio real) y pone Estatus='AFECTADO'.
-            --     AsisteD se inserta después para enlazarse al movimiento ya procesado.
-            -- ------------------------------------------------------------------
-            SET @SQL = N'
-                EXEC [' + @DB + N'].dbo.spAfectar
-                    ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'',
-                    NULL, ''INTELISIS'',
-                    @Estacion = 1, @ensilencio = 1;';
-
-            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID = @AsisteID;
-
-            -- ------------------------------------------------------------------
-            -- 3c. INSERT en AsisteD
-            --     ID = @AsisteID (mismo del Asiste ya afectado — el ID no cambia
-            --     tras spAfectar, confirmado).
+            -- 3b. INSERT en AsisteD
+            --     Debe existir ANTES de llamar a spAfectar.
             --     Renglon: consecutivo GLOBAL de toda la tabla AsisteD.
             --     Personal: UsuarioDispositivo completo como INT.
             -- ------------------------------------------------------------------
@@ -242,6 +228,20 @@ BEGIN
                 @TipoReg   = @TipoRegistro,
                 @Hora      = @HoraStr,
                 @Fecha     = @FechaEvento;
+
+            -- ------------------------------------------------------------------
+            -- 3c. Afectar el movimiento en el ERP
+            --     spAfectar genera MovID (folio real) y pone Estatus='PROCESAR'.
+            --     'PROCESAR' es el estado final esperado en Intelisis para este flujo.
+            --     AsisteD ya existe antes de esta llamada (requerido por spAfectar).
+            -- ------------------------------------------------------------------
+            SET @SQL = N'
+                EXEC [' + @DB + N'].dbo.spAfectar
+                    ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'',
+                    NULL, ''INTELISIS'',
+                    @Estacion = 1, @ensilencio = 1;';
+
+            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID = @AsisteID;
 
             -- ------------------------------------------------------------------
             -- 3d. Marcar como Hecho

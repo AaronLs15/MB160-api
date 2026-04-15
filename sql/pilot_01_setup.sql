@@ -277,7 +277,7 @@ BEGIN
                 OUTPUT INSERTED.ID INTO @ids
                 VALUES
                 (@EmpresaCode, ''Registro'', CAST(@Fecha AS DATE), CAST(@Fecha AS DATE),
-                 ''SIN AFECTAR'', ''INTELISIS'', YEAR(@Fecha), MONTH(@Fecha), SYSDATETIME(),
+                 ''SINAFECTAR'', ''INTELISIS'', YEAR(@Fecha), MONTH(@Fecha), SYSDATETIME(),
                  1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
                 SELECT @AsisteID = ID FROM @ids;';
             SET @Params = N'@EmpresaCode NVARCHAR(50), @Fecha DATETIME2(0), @AsisteID INT OUTPUT';
@@ -286,11 +286,7 @@ BEGIN
             IF @AsisteID IS NULL
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL — verificar si Asiste.ID se genera en el INSERT.', 16, 1);
 
-            -- Afectar (genera MovID y pone Estatus=AFECTADO antes de insertar AsisteD)
-            SET @SQL = N'EXEC [' + @DB + N'].dbo.spAfectar ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'', NULL, ''INTELISIS'', @Estacion=1, @ensilencio=1;';
-            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID=@AsisteID;
-
-            -- INSERT AsisteD (después de spAfectar — ID=@AsisteID no cambia tras afectar)
+            -- INSERT AsisteD antes de spAfectar (requerido por spAfectar)
             -- Renglon: consecutivo GLOBAL de toda AsisteD (sin filtro por ID).
             -- Personal: UsuarioDispositivo completo como INT.
             SET @SQL = N'
@@ -307,6 +303,10 @@ BEGIN
                  0, 0, 0, 0, 0);';
             SET @Params = N'@AsisteID INT, @PersonaID INT, @TipoReg NVARCHAR(20), @Hora NCHAR(5), @Fecha DATETIME2(0)';
             EXEC sp_executesql @SQL, @Params, @AsisteID=@AsisteID, @PersonaID=@PersonaID, @TipoReg=@TipoRegistro, @Hora=@HoraStr, @Fecha=@FechaEvento;
+
+            -- spAfectar genera MovID y pone Estatus='PROCESAR' (estado final esperado)
+            SET @SQL = N'EXEC [' + @DB + N'].dbo.spAfectar ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'', NULL, ''INTELISIS'', @Estacion=1, @ensilencio=1;';
+            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID=@AsisteID;
 
             UPDATE dbo.MarcajeDispatchQueue
             SET Estatus=2, AsisteID=@AsisteID, ProcesadoEn=SYSDATETIME(), UltimoError=NULL, UltimoCambio=SYSDATETIME()
