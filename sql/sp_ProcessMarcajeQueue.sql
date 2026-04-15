@@ -147,6 +147,7 @@ BEGIN
 
             -- ------------------------------------------------------------------
             -- 3a. INSERT en Asiste + captura de ID con OUTPUT INSERTED.ID
+            --     MovID se omite — spAfectar genera el folio real.
             --     (no se usa SCOPE_IDENTITY porque el ID puede ser manejado
             --      por el ERP con lógica propia, no como IDENTITY de SQL Server)
             -- ------------------------------------------------------------------
@@ -155,7 +156,7 @@ BEGIN
 
                 INSERT INTO [' + @DB + N'].dbo.Asiste
                 (
-                    Empresa, Mov, MovID,
+                    Empresa, Mov,
                     FechaEmision, FechaAplicacion,
                     Estatus, Usuario,
                     Ejercicio, Periodo,
@@ -168,7 +169,7 @@ BEGIN
                 OUTPUT INSERTED.ID INTO @ids
                 VALUES
                 (
-                    @EmpresaCode, ''Registro'', ''AVC1'',
+                    @EmpresaCode, ''Registro'',
                     CAST(@Fecha AS DATE), CAST(@Fecha AS DATE),
                     ''SIN AFECTAR'', ''INTELISIS'',
                     YEAR(@Fecha), MONTH(@Fecha),
@@ -192,11 +193,24 @@ BEGIN
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL — revisar si Asiste.ID es generado correctamente.', 16, 1);
 
             -- ------------------------------------------------------------------
-            -- 3b. INSERT en AsisteD
-            --     Renglon: consecutivo GLOBAL de toda la tabla AsisteD
-            --     (no es por documento). Se toma MAX(Renglon)+1 sin filtro.
-            --     Personal: UsuarioDispositivo completo como INT
-            --     (relación: AsistenciaMarcaje.UsuarioDispositivo = AsisteD.Personal)
+            -- 3b. Afectar el movimiento en el ERP
+            --     spAfectar genera MovID (folio real) y pone Estatus='AFECTADO'.
+            --     AsisteD se inserta después para enlazarse al movimiento ya procesado.
+            -- ------------------------------------------------------------------
+            SET @SQL = N'
+                EXEC [' + @DB + N'].dbo.spAfectar
+                    ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'',
+                    NULL, ''INTELISIS'',
+                    @Estacion = 1, @ensilencio = 1;';
+
+            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID = @AsisteID;
+
+            -- ------------------------------------------------------------------
+            -- 3c. INSERT en AsisteD
+            --     ID = @AsisteID (mismo del Asiste ya afectado — el ID no cambia
+            --     tras spAfectar, confirmado).
+            --     Renglon: consecutivo GLOBAL de toda la tabla AsisteD.
+            --     Personal: UsuarioDispositivo completo como INT.
             -- ------------------------------------------------------------------
             SET @SQL = N'
                 DECLARE @renglon INT;
@@ -228,17 +242,6 @@ BEGIN
                 @TipoReg   = @TipoRegistro,
                 @Hora      = @HoraStr,
                 @Fecha     = @FechaEvento;
-
-            -- ------------------------------------------------------------------
-            -- 3c. Afectar el movimiento en el ERP
-            -- ------------------------------------------------------------------
-            SET @SQL = N'
-                EXEC [' + @DB + N'].dbo.spAfectar
-                    ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'',
-                    NULL, ''INTELISIS'',
-                    @Estacion = 1, @ensilencio = 1;';
-
-            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID = @AsisteID;
 
             -- ------------------------------------------------------------------
             -- 3d. Marcar como Hecho

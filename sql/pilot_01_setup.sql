@@ -266,17 +266,17 @@ BEGIN
             END;
             SET @HoraStr = CONVERT(NCHAR(5), @HoraEvento, 108);
 
-            -- INSERT Asiste con OUTPUT INSERTED.ID
+            -- INSERT Asiste con OUTPUT INSERTED.ID (MovID omitido — lo genera spAfectar)
             SET @SQL = N'
                 DECLARE @ids TABLE (ID INT);
                 INSERT INTO [' + @DB + N'].dbo.Asiste
-                (Empresa, Mov, MovID, FechaEmision, FechaAplicacion,
+                (Empresa, Mov, FechaEmision, FechaAplicacion,
                  Estatus, Usuario, Ejercicio, Periodo, FechaRegistro,
                  Sucursal, GenerarPoliza, SincroC, SucursalOrigen,
                  Logico1, Logico2, Logico3, Logico4, Logico5, Logico6, Logico7, Logico8, Logico9)
                 OUTPUT INSERTED.ID INTO @ids
                 VALUES
-                (@EmpresaCode, ''Registro'', ''AVC1'', CAST(@Fecha AS DATE), CAST(@Fecha AS DATE),
+                (@EmpresaCode, ''Registro'', CAST(@Fecha AS DATE), CAST(@Fecha AS DATE),
                  ''SIN AFECTAR'', ''INTELISIS'', YEAR(@Fecha), MONTH(@Fecha), SYSDATETIME(),
                  1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
                 SELECT @AsisteID = ID FROM @ids;';
@@ -286,7 +286,11 @@ BEGIN
             IF @AsisteID IS NULL
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL — verificar si Asiste.ID se genera en el INSERT.', 16, 1);
 
-            -- INSERT AsisteD
+            -- Afectar (genera MovID y pone Estatus=AFECTADO antes de insertar AsisteD)
+            SET @SQL = N'EXEC [' + @DB + N'].dbo.spAfectar ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'', NULL, ''INTELISIS'', @Estacion=1, @ensilencio=1;';
+            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID=@AsisteID;
+
+            -- INSERT AsisteD (después de spAfectar — ID=@AsisteID no cambia tras afectar)
             -- Renglon: consecutivo GLOBAL de toda AsisteD (sin filtro por ID).
             -- Personal: UsuarioDispositivo completo como INT.
             SET @SQL = N'
@@ -303,10 +307,6 @@ BEGIN
                  0, 0, 0, 0, 0);';
             SET @Params = N'@AsisteID INT, @PersonaID INT, @TipoReg NVARCHAR(20), @Hora NCHAR(5), @Fecha DATETIME2(0)';
             EXEC sp_executesql @SQL, @Params, @AsisteID=@AsisteID, @PersonaID=@PersonaID, @TipoReg=@TipoRegistro, @Hora=@HoraStr, @Fecha=@FechaEvento;
-
-            -- Afectar
-            SET @SQL = N'EXEC [' + @DB + N'].dbo.spAfectar ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'', NULL, ''INTELISIS'', @Estacion=1, @ensilencio=1;';
-            EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID=@AsisteID;
 
             UPDATE dbo.MarcajeDispatchQueue
             SET Estatus=2, AsisteID=@AsisteID, ProcesadoEn=SYSDATETIME(), UltimoError=NULL, UltimoCambio=SYSDATETIME()
