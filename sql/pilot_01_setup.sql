@@ -266,13 +266,18 @@ BEGIN
             IF @AsisteID IS NULL
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL — verificar si Asiste.ID se genera en el INSERT.', 16, 1);
 
-            -- INSERT AsisteD
+            -- INSERT AsisteD — Renglon es NOT NULL, no es IDENTITY.
+            -- MAX(Renglon)+1 garantiza unicidad si hubiera un reintento parcial.
             SET @SQL = N'
+                DECLARE @renglon INT;
+                SELECT @renglon = ISNULL(MAX(Renglon), 0) + 1
+                FROM [' + @DB + N'].dbo.AsisteD WHERE ID = @AsisteID;
+
                 INSERT INTO [' + @DB + N'].dbo.AsisteD
-                (ID, Personal, Registro, HoraRegistro, FechaD, FechaA, Fecha, Sucursal,
+                (ID, Renglon, Personal, Registro, HoraRegistro, FechaD, FechaA, Fecha, Sucursal,
                  Logico1, Logico2, Logico3, Logico4, Logico5)
                 VALUES
-                (@AsisteID, @PersonaID, @TipoReg, @Hora,
+                (@AsisteID, @renglon, @PersonaID, @TipoReg, @Hora,
                  CAST(@Fecha AS DATE), CAST(@Fecha AS DATE), CAST(@Fecha AS DATE), 1,
                  0, 0, 0, 0, 0);';
             SET @Params = N'@AsisteID INT, @PersonaID INT, @TipoReg NVARCHAR(20), @Hora NCHAR(5), @Fecha DATETIME2(0)';

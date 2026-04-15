@@ -172,11 +172,20 @@ BEGIN
 
             -- ------------------------------------------------------------------
             -- 3b. INSERT en AsisteD
+            --     Renglon: número de línea por documento. Cada Asiste que
+            --     creamos tiene exactamente 1 línea de AsisteD, por lo que
+            --     siempre es 1. Se calcula con MAX(Renglon)+1 para seguridad
+            --     en caso de reintento que ya haya insertado parcialmente.
             -- ------------------------------------------------------------------
             SET @SQL = N'
+                DECLARE @renglon INT;
+                SELECT @renglon = ISNULL(MAX(Renglon), 0) + 1
+                FROM [' + @DB + N'].dbo.AsisteD
+                WHERE ID = @AsisteID;
+
                 INSERT INTO [' + @DB + N'].dbo.AsisteD
                 (
-                    ID,
+                    ID, Renglon,
                     Personal, Registro, HoraRegistro,
                     FechaD, FechaA, Fecha,
                     Sucursal,
@@ -184,7 +193,7 @@ BEGIN
                 )
                 VALUES
                 (
-                    @AsisteID,
+                    @AsisteID, @renglon,
                     @PersonaID, @TipoReg, @Hora,
                     CAST(@Fecha AS DATE), CAST(@Fecha AS DATE), CAST(@Fecha AS DATE),
                     1,
