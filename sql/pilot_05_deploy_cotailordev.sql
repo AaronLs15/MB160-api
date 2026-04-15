@@ -128,6 +128,7 @@ BEGIN
         @SQL          NVARCHAR(MAX), @Params NVARCHAR(MAX),
         @AsisteID     INT,
         @TipoRegistro NVARCHAR(20), @HoraEvento TIME, @HoraStr NCHAR(5),
+        @MovIDPost    NVARCHAR(50),
         @ErrMsg       NVARCHAR(4000);
 
     DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
@@ -187,6 +188,19 @@ BEGIN
             -- spAfectar genera MovID y pone Estatus='PROCESAR' (estado final esperado)
             SET @SQL = N'EXEC [' + @DB + N'].dbo.spAfectar ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'', NULL, ''INTELISIS'', @Estacion=1, @ensilencio=1;';
             EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID=@AsisteID;
+
+            -- Validar que spAfectar generó el MovID
+            -- Con @ensilencio=1 los fallos son silenciosos; si MovID sigue NULL el
+            -- registro debe reintentarse (Estatus=3), no marcarse como Hecho.
+            SET @MovIDPost = NULL;
+            SET @SQL = N'SELECT @MovIDPost = MovID FROM [' + @DB + N'].dbo.Asiste WHERE ID = @AsisteID;';
+            EXEC sp_executesql @SQL,
+                N'@AsisteID INT, @MovIDPost NVARCHAR(50) OUTPUT',
+                @AsisteID  = @AsisteID,
+                @MovIDPost = @MovIDPost OUTPUT;
+
+            IF @MovIDPost IS NULL
+                RAISERROR(N'spAfectar no generó MovID para Asiste.ID=%d — se reintentará en el siguiente ciclo.', 16, 1, @AsisteID);
 
             UPDATE dbo.MarcajeDispatchQueue
             SET Estatus=2, AsisteID=@AsisteID, ProcesadoEn=SYSDATETIME(), UltimoError=NULL, UltimoCambio=SYSDATETIME()
