@@ -88,6 +88,6 @@ ORDER BY Punch;
 PRINT '';
 PRINT '══ BACKFILL COMPLETADO ══';
 PRINT 'Siguiente paso: ejecutar manualmente el SP con un batch pequeño para validar:';
-PRINT '  EXEC dbo.sp_ProcessMarcajeQueue @Punch = 0, @BatchSize = 5;';
+PRINT '  EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 0, @BatchSize = 5;';
 PRINT 'Luego revisar cotailordev.dbo.Asiste y AsisteD antes de continuar.';
 GO

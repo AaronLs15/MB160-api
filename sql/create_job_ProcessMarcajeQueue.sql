@@ -2,10 +2,13 @@
     Crea los SQL Server Agent Jobs de corte de asistencia MB160.
 
     Según "Reglas de reloj checador" (Regla 6 y 9):
-      - 12:00      → Corte de Entrada  (Punch = 0)
-      - 16:00      → Corte de Comida   (Punch = 4, ventana 12:50–16:10 validada en el SP)
-      - 23:00      → Corte de Salida   (Punch = 1)
+      - 12:00      → Corte de Entrada  (TipoCorte = 0 → registros < 12:00)
+      - 16:00      → Corte de Comida   (TipoCorte = 4 → registros 12:50–15:59)
+      - 23:00      → Corte de Salida   (TipoCorte = 1 → registros >= 16:00)
       - Martes     → Corte Semanal     (procesa cualquier pendiente rezagado de la semana)
+
+    Nota: la clasificación Entrada/Comida/Salida se basa en la hora del evento,
+    no en el valor Punch del dispositivo. Ver sp_ProcessMarcajeQueue.
 
     PREREQUISITOS:
       - SQL Server Agent habilitado y corriendo.
@@ -100,15 +103,15 @@ GO
 -- =============================================================================
 EXEC msdb.dbo.sp_add_job
     @job_name              = N'MB160_Corte_Entrada',
-    @description           = N'Corte de entrada 12:00. Despacha marcajes Punch=0 (Entrada) al ERP. Regla 6.',
+    @description           = N'Corte de entrada 12:00. Registros < 12:00 → Registro=Entrada. Regla 6.',
     @enabled               = 1,
     @notify_level_eventlog = 2;   -- log solo en error
 
 EXEC msdb.dbo.sp_add_jobstep
     @job_name            = N'MB160_Corte_Entrada',
-    @step_name           = N'Procesar Punch=0 Entrada',
+    @step_name           = N'Procesar TipoCorte=0 Entrada',
     @subsystem           = N'TSQL',
-    @command             = N'EXEC dbo.sp_ProcessMarcajeQueue @Punch = 0, @BatchSize = 500;',
+    @command             = N'EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 0, @BatchSize = 500;',
     @database_name       = N'<NOMBRE_BASE_CHECADOR>',
     @on_success_action   = 1,
     @on_fail_action      = 2;
@@ -128,15 +131,15 @@ GO
 -- =============================================================================
 EXEC msdb.dbo.sp_add_job
     @job_name              = N'MB160_Corte_Comida',
-    @description           = N'Corte de comida 16:00. Despacha marcajes Punch=4 (Comida) al ERP. Ventana horaria 12:50-16:10. Reglas 3 y 6.',
+    @description           = N'Corte de comida 16:00. Registros 12:50–15:59 → Registro=Comida. Reglas 3 y 6.',
     @enabled               = 1,
     @notify_level_eventlog = 2;
 
 EXEC msdb.dbo.sp_add_jobstep
     @job_name            = N'MB160_Corte_Comida',
-    @step_name           = N'Procesar Punch=4 Comida',
+    @step_name           = N'Procesar TipoCorte=4 Comida',
     @subsystem           = N'TSQL',
-    @command             = N'EXEC dbo.sp_ProcessMarcajeQueue @Punch = 4, @BatchSize = 500;',
+    @command             = N'EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 4, @BatchSize = 500;',
     @database_name       = N'<NOMBRE_BASE_CHECADOR>',
     @on_success_action   = 1,
     @on_fail_action      = 2;
@@ -155,15 +158,15 @@ GO
 -- =============================================================================
 EXEC msdb.dbo.sp_add_job
     @job_name              = N'MB160_Corte_Salida',
-    @description           = N'Corte de salida 23:00. Despacha marcajes Punch=1 (Salida) al ERP. Regla 6.',
+    @description           = N'Corte de salida 23:00. Registros >= 16:00 → Registro=Salida. Regla 6.',
     @enabled               = 1,
     @notify_level_eventlog = 2;
 
 EXEC msdb.dbo.sp_add_jobstep
     @job_name            = N'MB160_Corte_Salida',
-    @step_name           = N'Procesar Punch=1 Salida',
+    @step_name           = N'Procesar TipoCorte=1 Salida',
     @subsystem           = N'TSQL',
-    @command             = N'EXEC dbo.sp_ProcessMarcajeQueue @Punch = 1, @BatchSize = 500;',
+    @command             = N'EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 1, @BatchSize = 500;',
     @database_name       = N'<NOMBRE_BASE_CHECADOR>',
     @on_success_action   = 1,
     @on_fail_action      = 2;
@@ -191,7 +194,7 @@ EXEC msdb.dbo.sp_add_jobstep
     @job_name            = N'MB160_Corte_Semanal',
     @step_name           = N'Procesar todos los pendientes de la semana',
     @subsystem           = N'TSQL',
-    @command             = N'EXEC dbo.sp_ProcessMarcajeQueue @Punch = NULL, @BatchSize = 1000;',
+    @command             = N'EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = NULL, @BatchSize = 1000;',
     @database_name       = N'<NOMBRE_BASE_CHECADOR>',
     @on_success_action   = 1,
     @on_fail_action      = 2;

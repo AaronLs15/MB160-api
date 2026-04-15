@@ -103,19 +103,35 @@ WHERE a.MovID   = 'AVC1'
 ORDER BY d.ID DESC;
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 6. CRUCE CHECADOR ↔ ERP (validar que los datos coinciden)
+-- 6. CRUCE CHECADOR ↔ ERP (validar tipo esperado por hora vs insertado)
 -- ─────────────────────────────────────────────────────────────────────────────
 PRINT '── 6. Cruce Checador ↔ cotailordev ──';
 
 SELECT
     am.UsuarioDispositivo,
     am.EventoFechaHora                              AS FechaHoraChecador,
-    CASE am.Punch WHEN 0 THEN 'Entrada' WHEN 1 THEN 'Salida' WHEN 4 THEN 'Comida' END AS TipoChecador,
+    CAST(am.EventoFechaHora AS TIME)                AS HoraEvento,
+    am.Punch                                        AS PunchDispositivo,
+    CASE
+        WHEN CAST(am.EventoFechaHora AS TIME) <  '12:00:00' THEN 'Entrada'
+        WHEN CAST(am.EventoFechaHora AS TIME) <  '12:50:00' THEN '(zona gris)'
+        WHEN CAST(am.EventoFechaHora AS TIME) <  '16:00:00' THEN 'Comida'
+        ELSE                                                      'Salida'
+    END                                             AS TipoEsperado,
+    d.Registro                                      AS TipoInsertado,
+    CASE
+        WHEN d.Registro IS NULL THEN '⚠ Sin registro'
+        WHEN d.Registro = CASE
+                WHEN CAST(am.EventoFechaHora AS TIME) <  '12:00:00' THEN 'Entrada'
+                WHEN CAST(am.EventoFechaHora AS TIME) <  '12:50:00' THEN '(zona gris)'
+                WHEN CAST(am.EventoFechaHora AS TIME) <  '16:00:00' THEN 'Comida'
+                ELSE 'Salida'
+             END                                    THEN 'OK'
+        ELSE                                             '*** MISMATCH ***'
+    END                                             AS Resultado,
     d.Personal                                      AS PersonalERP,
-    d.Registro                                      AS TipoERP,
     d.HoraRegistro                                  AS HoraERP,
     d.Fecha                                         AS FechaERP,
-    q.Estatus,
     q.AsisteID
 FROM dbo.MarcajeDispatchQueue q
 INNER JOIN dbo.AsistenciaMarcaje am ON am.AsistenciaMarcajeID = q.AsistenciaMarcajeID
@@ -128,17 +144,27 @@ ORDER BY am.EventoFechaHora;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 7. PENDIENTES RESTANTES (para saber cuánto falta)
 -- ─────────────────────────────────────────────────────────────────────────────
-PRINT '── 7. Pendientes restantes por tipo ──';
+PRINT '── 7. Pendientes restantes por ventana horaria ──';
 
 SELECT
-    Punch,
-    CASE Punch WHEN 0 THEN 'Entrada' WHEN 1 THEN 'Salida' WHEN 4 THEN 'Comida' END AS Tipo,
-    COUNT(*)                AS Pendientes,
-    MIN(EventoFechaHora)    AS MasAntiguo,
-    MAX(EventoFechaHora)    AS MasReciente
+    CASE
+        WHEN CAST(EventoFechaHora AS TIME) <  '12:00:00' THEN '0  Entrada  (< 12:00)'
+        WHEN CAST(EventoFechaHora AS TIME) <  '12:50:00' THEN '!  Zona gris (12:00–12:49) → Descartado'
+        WHEN CAST(EventoFechaHora AS TIME) <  '16:00:00' THEN '4  Comida   (12:50–15:59)'
+        ELSE                                                   '1  Salida   (>= 16:00)'
+    END                      AS VentanaHoraria,
+    COUNT(*)                 AS Pendientes,
+    MIN(EventoFechaHora)     AS MasAntiguo,
+    MAX(EventoFechaHora)     AS MasReciente
 FROM dbo.MarcajeDispatchQueue
 WHERE Estatus IN (0, 3)
   AND BaseDatos = N'cotailordev'
-GROUP BY Punch
-ORDER BY Punch;
+GROUP BY
+    CASE
+        WHEN CAST(EventoFechaHora AS TIME) <  '12:00:00' THEN '0  Entrada  (< 12:00)'
+        WHEN CAST(EventoFechaHora AS TIME) <  '12:50:00' THEN '!  Zona gris (12:00–12:49) → Descartado'
+        WHEN CAST(EventoFechaHora AS TIME) <  '16:00:00' THEN '4  Comida   (12:50–15:59)'
+        ELSE                                                   '1  Salida   (>= 16:00)'
+    END
+ORDER BY VentanaHoraria;
 GO

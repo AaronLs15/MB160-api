@@ -1,20 +1,30 @@
 CREATE OR ALTER PROCEDURE dbo.sp_ProcessMarcajeQueue
-    @Punch     TINYINT = NULL,   -- Filtro de tipo de corte: 0=Entrada, 1=Salida, 4=Comida. NULL = todos.
+    @TipoCorte TINYINT = NULL,   -- Ventana horaria a procesar:
+                                  --   0 = Entrada  (< 12:00)
+                                  --   4 = Comida   (12:50 – 15:59)
+                                  --   1 = Salida   (>= 16:00)
+                                  -- NULL = todas las ventanas (corte semanal)
     @BatchSize INT     = 200
 AS
 /*
     Orquestador de despacho de marcajes MB160 → ERPs (misma instancia SQL Server).
     Invocado por los SQL Agent Jobs de corte de asistencia (Regla 6):
-      - 12:00 → Corte de Entrada  (EXEC sp_ProcessMarcajeQueue @Punch = 0)
-      - 16:00 → Corte de Comida   (EXEC sp_ProcessMarcajeQueue @Punch = 4)
-      - 23:00 → Corte de Salida   (EXEC sp_ProcessMarcajeQueue @Punch = 1)
+      - 12:00 → Corte de Entrada  (EXEC sp_ProcessMarcajeQueue @TipoCorte = 0)
+      - 16:00 → Corte de Comida   (EXEC sp_ProcessMarcajeQueue @TipoCorte = 4)
+      - 23:00 → Corte de Salida   (EXEC sp_ProcessMarcajeQueue @TipoCorte = 1)
+
+    Clasificación de Registro por hora del evento (no por Punch del dispositivo):
+      < 12:00:00              → 'Entrada'
+      12:00:00 – 12:49:59     → Descartado (zona gris, sin categoría — Estatus=4)
+      12:50:00 – 15:59:59     → 'Comida'
+      >= 16:00:00             → 'Salida'
 
     Fixes aplicados:
       - CodigoEmpresa se lee de dbo.EmpresaConfig (no con SELECT dinámico al ERP).
       - AsisteID se captura con OUTPUT INSERTED.ID (no SCOPE_IDENTITY, que falla
         cuando el ID de Asiste es manejado por el ERP y no es un IDENTITY de SQL).
+      - Renglon es consecutivo GLOBAL de toda la tabla AsisteD (sin filtro por ID).
 
-    Regla 3: Comida fuera de 12:50–16:10 → Estatus=4 (Descartado, no reintentable).
     Estatus: 0=Pendiente 1=Procesando 2=Hecho 3=Error(reintentable) 4=Descartado
 */
 BEGIN
@@ -22,6 +32,7 @@ BEGIN
 
     -- -------------------------------------------------------------------------
     -- 1. Tomar batch y marcarlo como Procesando
+    --    Filtro por ventana horaria según @TipoCorte
     -- -------------------------------------------------------------------------
     DECLARE @batch TABLE
     (
@@ -40,7 +51,13 @@ BEGIN
         FROM dbo.MarcajeDispatchQueue q
         WITH (READPAST, UPDLOCK, ROWLOCK)
         WHERE q.Estatus IN (0, 3)
-          AND (@Punch IS NULL OR q.Punch = @Punch)
+          AND (
+              @TipoCorte IS NULL
+              OR (@TipoCorte = 0 AND CAST(q.EventoFechaHora AS TIME) <  '12:00:00')
+              OR (@TipoCorte = 4 AND CAST(q.EventoFechaHora AS TIME) >= '12:50:00'
+                                 AND CAST(q.EventoFechaHora AS TIME) <  '16:00:00')
+              OR (@TipoCorte = 1 AND CAST(q.EventoFechaHora AS TIME) >= '16:00:00')
+          )
         ORDER BY q.MarcajeDispatchQueueID
     )
     UPDATE q
@@ -62,23 +79,22 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
     -- -------------------------------------------------------------------------
-    -- 2. Descartar Comida fuera de ventana horaria 12:50–16:10 (Regla 3)
+    -- 2. Descartar marcajes en zona gris 12:00–12:49:59 (sin categoría horaria)
+    --    Solo aplica cuando @TipoCorte IS NULL (corte semanal que toma todo)
     -- -------------------------------------------------------------------------
     UPDATE dbo.MarcajeDispatchQueue
-    SET Estatus = 4,
-        UltimoError  = N'Comida fuera de ventana horaria permitida (12:50–16:10). Regla 3.',
+    SET Estatus      = 4,
+        UltimoError  = N'Marcaje en zona sin categoría (12:00–12:49). No corresponde a ningún corte.',
         UltimoCambio = SYSDATETIME()
     WHERE MarcajeDispatchQueueID IN (
         SELECT MarcajeDispatchQueueID FROM @batch
-        WHERE Punch = 4
-          AND (CAST(EventoFechaHora AS TIME) < '12:50:00'
-            OR CAST(EventoFechaHora AS TIME) > '16:10:00')
+        WHERE CAST(EventoFechaHora AS TIME) >= '12:00:00'
+          AND CAST(EventoFechaHora AS TIME) <  '12:50:00'
     );
 
     DELETE FROM @batch
-    WHERE Punch = 4
-      AND (CAST(EventoFechaHora AS TIME) < '12:50:00'
-        OR CAST(EventoFechaHora AS TIME) > '16:10:00');
+    WHERE CAST(EventoFechaHora AS TIME) >= '12:00:00'
+      AND CAST(EventoFechaHora AS TIME) <  '12:50:00';
 
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
@@ -98,6 +114,7 @@ BEGIN
         @Params       NVARCHAR(MAX),
         @AsisteID     INT,
         @TipoRegistro NVARCHAR(20),
+        @HoraEvento   TIME,
         @HoraStr      NCHAR(5),
         @ErrMsg       NVARCHAR(4000);
 
@@ -116,13 +133,17 @@ BEGIN
     BEGIN
         BEGIN TRY
 
-            SET @TipoRegistro = CASE @PunchVal
-                WHEN 0 THEN N'Entrada'
-                WHEN 1 THEN N'Salida'
-                WHEN 4 THEN N'Comida'
+            -- Clasificar por hora del evento (Punch del dispositivo es solo referencia)
+            SET @HoraEvento = CAST(@FechaEvento AS TIME);
+
+            SET @TipoRegistro = CASE
+                WHEN @HoraEvento <  '12:00:00'                             THEN N'Entrada'
+                WHEN @HoraEvento >= '12:50:00' AND @HoraEvento < '16:00:00' THEN N'Comida'
+                WHEN @HoraEvento >= '16:00:00'                             THEN N'Salida'
+                ELSE NULL   -- zona gris ya descartada en el paso 2
             END;
 
-            SET @HoraStr = CONVERT(NCHAR(5), CAST(@FechaEvento AS TIME), 108);
+            SET @HoraStr = CONVERT(NCHAR(5), @HoraEvento, 108);
 
             -- ------------------------------------------------------------------
             -- 3a. INSERT en Asiste + captura de ID con OUTPUT INSERTED.ID

@@ -12,7 +12,9 @@ BEGIN
     -- La relación con el ERP es: AsistenciaMarcaje.UsuarioDispositivo = AsisteD.Personal
     -- Por eso PersonaID guarda el UsuarioDispositivo completo convertido a INT.
     --
-    -- Solo se encolan Punch válidos: 0=Entrada, 1=Salida, 4=Comida.
+    -- El tipo de Registro (Entrada/Comida/Salida) se determina por hora del evento
+    -- en sp_ProcessMarcajeQueue — no por el valor Punch del dispositivo.
+    -- Se encolan todos los marcajes de empresas activas (sin filtro por Punch).
 
     INSERT INTO dbo.MarcajeDispatchQueue
         (AsistenciaMarcajeID, EmpresaID, BaseDatos, PersonaID, Punch, EventoFechaHora)
@@ -27,8 +29,7 @@ BEGIN
     INNER JOIN dbo.EmpresaConfig ec
         ON  ec.EmpresaPrefix = LEFT(i.UsuarioDispositivo, 1)
         AND ec.Activo = 1
-    WHERE i.Punch IN (0, 1, 4)
-      AND LEN(i.UsuarioDispositivo) >= 2
+    WHERE LEN(i.UsuarioDispositivo) >= 2
       AND ISNUMERIC(i.UsuarioDispositivo) = 1;
 END;
 GO

@@ -133,23 +133,24 @@ AFTER INSERT
 AS
 BEGIN
     SET NOCOUNT ON;
-    -- Formato real: primer dígito = empresa, resto = PersonaID
-    -- Ejemplo: '50076' → empresa '5' (cotailordev), PersonaID 76
+    -- Formato: primer dígito = empresa, valor completo = Personal en AsisteD
+    -- Ejemplo: '50076' → empresa '5' (cotailordev), Personal = 50076
+    -- El tipo de Registro (Entrada/Comida/Salida) se determina por hora en sp_ProcessMarcajeQueue.
+    -- Se encolan todos los marcajes de empresas activas sin filtrar por Punch.
     INSERT INTO dbo.MarcajeDispatchQueue
         (AsistenciaMarcajeID, EmpresaID, BaseDatos, PersonaID, Punch, EventoFechaHora)
     SELECT
         i.AsistenciaMarcajeID,
-        CAST(LEFT(i.UsuarioDispositivo, 1) AS INT)                              AS EmpresaID,
+        CAST(LEFT(i.UsuarioDispositivo, 1) AS INT)   AS EmpresaID,
         ec.BaseDatos,
-        CAST(SUBSTRING(i.UsuarioDispositivo, 2, LEN(i.UsuarioDispositivo)) AS INT) AS PersonaID,
+        CAST(i.UsuarioDispositivo AS INT)            AS PersonaID,  -- valor completo
         i.Punch,
         i.EventoFechaHora
     FROM inserted i
     INNER JOIN dbo.EmpresaConfig ec
         ON  ec.EmpresaPrefix = LEFT(i.UsuarioDispositivo, 1)
         AND ec.Activo = 1
-    WHERE i.Punch IN (0, 1, 4)
-      AND LEN(i.UsuarioDispositivo) >= 2
+    WHERE LEN(i.UsuarioDispositivo) >= 2
       AND ISNUMERIC(i.UsuarioDispositivo) = 1;
 END;
 GO
@@ -160,13 +161,21 @@ GO
 -- 4. SP orquestador (con los dos fixes aplicados)
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE OR ALTER PROCEDURE dbo.sp_ProcessMarcajeQueue
-    @Punch     TINYINT = NULL,
+    @TipoCorte TINYINT = NULL,   -- Ventana horaria a procesar:
+                                  --   0 = Entrada  (< 12:00)
+                                  --   4 = Comida   (12:50 – 15:59)
+                                  --   1 = Salida   (>= 16:00)
+                                  -- NULL = todas (corte semanal)
     @BatchSize INT     = 200
 AS
 /*
-    Fix 1: CodigoEmpresa se lee de EmpresaConfig, no con SELECT dinámico al ERP.
-    Fix 2: AsisteID se captura con OUTPUT INSERTED.ID (no SCOPE_IDENTITY, que falla
-           cuando el ID de Asiste es manejado por el ERP, no como IDENTITY de SQL).
+    Clasificación de Registro por hora del evento (no por Punch del dispositivo):
+      < 12:00:00              → 'Entrada'
+      12:00:00 – 12:49:59     → Descartado (zona gris, Estatus=4)
+      12:50:00 – 15:59:59     → 'Comida'
+      >= 16:00:00             → 'Salida'
+    CodigoEmpresa se lee de EmpresaConfig.
+    AsisteID se captura con OUTPUT INSERTED.ID (no SCOPE_IDENTITY).
     Estatus: 0=Pendiente 1=Procesando 2=Hecho 3=Error(reintentable) 4=Descartado
 */
 BEGIN
@@ -188,14 +197,20 @@ BEGIN
         SELECT TOP (@BatchSize) q.MarcajeDispatchQueueID
         FROM dbo.MarcajeDispatchQueue q WITH (READPAST, UPDLOCK, ROWLOCK)
         WHERE q.Estatus IN (0, 3)
-          AND (@Punch IS NULL OR q.Punch = @Punch)
+          AND (
+              @TipoCorte IS NULL
+              OR (@TipoCorte = 0 AND CAST(q.EventoFechaHora AS TIME) <  '12:00:00')
+              OR (@TipoCorte = 4 AND CAST(q.EventoFechaHora AS TIME) >= '12:50:00'
+                                 AND CAST(q.EventoFechaHora AS TIME) <  '16:00:00')
+              OR (@TipoCorte = 1 AND CAST(q.EventoFechaHora AS TIME) >= '16:00:00')
+          )
         ORDER BY q.MarcajeDispatchQueueID
     )
     UPDATE q
     SET Estatus = 1, Intentos = Intentos + 1, UltimoCambio = SYSDATETIME()
     OUTPUT inserted.MarcajeDispatchQueueID, inserted.AsistenciaMarcajeID,
            inserted.BaseDatos, inserted.EmpresaID,
-           ec.CodigoEmpresa,                   -- ← de EmpresaConfig, no del ERP
+           ec.CodigoEmpresa,
            inserted.PersonaID, inserted.Punch, inserted.EventoFechaHora
     INTO @batch
     FROM dbo.MarcajeDispatchQueue q
@@ -204,21 +219,19 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
-    -- Descartar Comida fuera de ventana horaria (Regla 3: 12:50–16:10)
+    -- Descartar marcajes en zona gris 12:00–12:49 (sin categoría horaria)
     UPDATE dbo.MarcajeDispatchQueue
     SET Estatus = 4,
-        UltimoError = N'Comida fuera de ventana horaria permitida (12:50–16:10). Regla 3.',
+        UltimoError = N'Marcaje en zona sin categoría (12:00–12:49). No corresponde a ningún corte.',
         UltimoCambio = SYSDATETIME()
     WHERE MarcajeDispatchQueueID IN (
         SELECT MarcajeDispatchQueueID FROM @batch
-        WHERE Punch = 4
-          AND (CAST(EventoFechaHora AS TIME) < '12:50:00'
-            OR CAST(EventoFechaHora AS TIME) > '16:10:00')
+        WHERE CAST(EventoFechaHora AS TIME) >= '12:00:00'
+          AND CAST(EventoFechaHora AS TIME) <  '12:50:00'
     );
     DELETE FROM @batch
-    WHERE Punch = 4
-      AND (CAST(EventoFechaHora AS TIME) < '12:50:00'
-        OR CAST(EventoFechaHora AS TIME) > '16:10:00');
+    WHERE CAST(EventoFechaHora AS TIME) >= '12:00:00'
+      AND CAST(EventoFechaHora AS TIME) <  '12:50:00';
 
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
@@ -229,7 +242,7 @@ BEGIN
         @FechaEvento  DATETIME2(0),
         @SQL          NVARCHAR(MAX), @Params NVARCHAR(MAX),
         @AsisteID     INT,
-        @TipoRegistro NVARCHAR(20), @HoraStr NCHAR(5),
+        @TipoRegistro NVARCHAR(20), @HoraEvento TIME, @HoraStr NCHAR(5),
         @ErrMsg       NVARCHAR(4000);
 
     DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
@@ -243,10 +256,17 @@ BEGIN
     WHILE @@FETCH_STATUS = 0
     BEGIN
         BEGIN TRY
-            SET @TipoRegistro = CASE @PunchVal WHEN 0 THEN N'Entrada' WHEN 1 THEN N'Salida' WHEN 4 THEN N'Comida' END;
-            SET @HoraStr      = CONVERT(NCHAR(5), CAST(@FechaEvento AS TIME), 108);
+            -- Clasificar por hora del evento
+            SET @HoraEvento   = CAST(@FechaEvento AS TIME);
+            SET @TipoRegistro = CASE
+                WHEN @HoraEvento <  '12:00:00'                               THEN N'Entrada'
+                WHEN @HoraEvento >= '12:50:00' AND @HoraEvento < '16:00:00' THEN N'Comida'
+                WHEN @HoraEvento >= '16:00:00'                               THEN N'Salida'
+                ELSE NULL
+            END;
+            SET @HoraStr = CONVERT(NCHAR(5), @HoraEvento, 108);
 
-            -- INSERT Asiste con OUTPUT INSERTED.ID (funciona aunque ID no sea IDENTITY de SQL)
+            -- INSERT Asiste con OUTPUT INSERTED.ID
             SET @SQL = N'
                 DECLARE @ids TABLE (ID INT);
                 INSERT INTO [' + @DB + N'].dbo.Asiste
@@ -267,12 +287,12 @@ BEGIN
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL — verificar si Asiste.ID se genera en el INSERT.', 16, 1);
 
             -- INSERT AsisteD
-            -- Renglon: consecutivo GLOBAL de toda AsisteD (no por documento).
-            -- Personal: UsuarioDispositivo completo como INT (= AsistenciaMarcaje.UsuarioDispositivo).
+            -- Renglon: consecutivo GLOBAL de toda AsisteD (sin filtro por ID).
+            -- Personal: UsuarioDispositivo completo como INT.
             SET @SQL = N'
                 DECLARE @renglon INT;
                 SELECT @renglon = ISNULL(MAX(Renglon), 0) + 1
-                FROM [' + @DB + N'].dbo.AsisteD;  -- global, sin filtro por ID
+                FROM [' + @DB + N'].dbo.AsisteD;
 
                 INSERT INTO [' + @DB + N'].dbo.AsisteD
                 (ID, Renglon, Personal, Registro, HoraRegistro, FechaD, FechaA, Fecha, Sucursal,
@@ -308,7 +328,7 @@ BEGIN
     CLOSE cur; DEALLOCATE cur;
 END;
 GO
-PRINT '✓ SP dbo.sp_ProcessMarcajeQueue creado/actualizado (fix CodigoEmpresa + OUTPUT INSERTED.ID)';
+PRINT '✓ SP dbo.sp_ProcessMarcajeQueue creado/actualizado (clasificación por hora del evento)';
 GO
 
 PRINT '';
