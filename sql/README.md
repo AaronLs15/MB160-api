@@ -157,6 +157,9 @@ Captura `AsisteID` con `OUTPUT INSERTED.ID` (no `SCOPE_IDENTITY`).
 
 ## Instrucciones de despliegue en producción
 
+> **Flujo validado en cotailordev (2026-04-15).**  
+> La base de cotailor en producción es `cotailor7000`.
+
 ### Prerequisitos
 - SQL Server Agent habilitado y corriendo
 - El usuario tiene acceso de lectura/escritura en `Checador` y en los 4 ERPs
@@ -164,60 +167,130 @@ Captura `AsisteID` con `OUTPUT INSERTED.ID` (no `SCOPE_IDENTITY`).
 - Las tablas `dbo.EmpresaConfig` y `dbo.MarcajeDispatchQueue` ya existen en `Checador` (creadas en el piloto)
 - El trigger y el SP ya están instalados en `Checador`
 
-### Paso 1 — Activar las 4 empresas
+---
+
+### Paso 1 — Redesplegar el SP en Checador
+
+El SP fue actualizado con dos correcciones críticas validadas en piloto:
+1. `Estatus = 'SINAFECTAR'` (sin espacio) — requerido por `spAfectar`
+2. `INSERT AsisteD` **antes** de `EXEC spAfectar` — spAfectar necesita los renglones para afectar
+
+```sql
+-- Ejecutar en: Checador
+-- Script: sp_ProcessMarcajeQueue.sql
+-- (usar CREATE OR ALTER — reemplaza sin borrar datos)
+```
+
+Verificar que se actualizó:
+```sql
+USE Checador;
+SELECT modify_date FROM sys.objects WHERE name = 'sp_ProcessMarcajeQueue';
+-- La fecha debe ser de hoy
+```
+
+---
+
+### Paso 2 — Activar las 4 empresas
 
 ```sql
 -- Ejecutar en: Checador
 -- Script: prod_01_activar_empresas.sql
 ```
 
-Revisar la Sección A. Si algún ERP muestra `✗ ERROR`, corregir permisos antes de continuar.  
+Revisar la Sección A (pre-checks). Si algún ERP muestra `✗ ERROR`, corregir permisos antes de continuar.  
 La Sección B actualiza `EmpresaConfig`: activa las 4 empresas y apunta cotailor a `cotailor7000`.
 
-### Paso 2 — Backfill desde el 1 de abril
+| EmpresaID | Prefijo | Base ERP        |
+|-----------|---------|-----------------|
+| 2         | `2`     | `kingv7`        |
+| 3         | `3`     | `obsidianav7`   |
+| 4         | `4`     | `bbgv7`         |
+| 5         | `5`     | `cotailor7000`  |
+
+---
+
+### Paso 3 — Backfill desde el 1 de abril
 
 ```sql
 -- Ejecutar en: Checador
 -- Script: prod_02_backfill_abril.sql
 ```
 
-Encola todo lo de `2026-04-01` en adelante. Se puede re-ejecutar sin duplicar.  
+Encola todo lo de `2026-04-01` en adelante para las 4 empresas activas.  
+Se puede re-ejecutar sin duplicar (tiene guard `WHERE NOT EXISTS`).  
 Anotar el total de registros encolados por empresa.
 
-### Paso 3 — Prueba con batch pequeño
+---
+
+### Paso 4 — Prueba con batch pequeño (5 por tipo)
 
 ```sql
 USE Checador;
 
-EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 0, @BatchSize = 10;   -- Entrada
-EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 4, @BatchSize = 10;   -- Comida
-EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 1, @BatchSize = 10;   -- Salida
+-- Procesar 5 de cada tipo
+EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 0, @BatchSize = 5;   -- Entrada  (< 12:00)
+EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 4, @BatchSize = 5;   -- Comida   (12:50–15:59)
+EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = 1, @BatchSize = 5;   -- Salida   (>= 16:00)
 ```
 
-Verificar en los 4 ERPs:
+Verificar en **cada uno** de los 4 ERPs:
+
 ```sql
--- Ver últimos inserts por empresa
-SELECT TOP 10 d.ID, d.Personal, d.Registro, d.HoraRegistro, d.Fecha
-FROM [kingv7].dbo.AsisteD d
-INNER JOIN [kingv7].dbo.Asiste a ON a.ID = d.ID
-WHERE a.MovID = 'AVC1' AND a.Usuario = 'INTELISIS'
+-- Últimos inserts (repetir para kingv7, obsidianav7, bbgv7, cotailor7000)
+SELECT TOP 5 a.ID, a.MovID, a.Estatus, d.Personal, d.Registro, d.HoraRegistro, d.Fecha
+FROM [cotailor7000].dbo.AsisteD d
+INNER JOIN [cotailor7000].dbo.Asiste a ON a.ID = d.ID
+WHERE a.Usuario = 'INTELISIS'
 ORDER BY d.ID DESC;
--- Repetir para obsidianav7, bbgv7, cotailor7000
 ```
 
-Verificar que `Registro` coincide con la hora:
-- Hora < 12:00 → `'Entrada'`
-- Hora 12:50–15:59 → `'Comida'`
-- Hora >= 16:00 → `'Salida'`
+**Resultado esperado:**
+- `Asiste.Estatus = 'PROCESAR'`
+- `Asiste.MovID` con folio generado (no NULL)
+- `AsisteD.Registro` correcto según hora del evento
+- Sin `UltimoError` en la cola
 
-### Paso 4 — Crear los Agent Jobs
+Verificar la cola:
+```sql
+USE Checador;
+SELECT BaseDatos, Estatus,
+       CASE Estatus WHEN 0 THEN 'Pendiente' WHEN 1 THEN 'Procesando'
+                    WHEN 2 THEN 'Hecho' WHEN 3 THEN 'Error' WHEN 4 THEN 'Descartado' END AS Desc,
+       COUNT(*) AS Total
+FROM dbo.MarcajeDispatchQueue
+GROUP BY BaseDatos, Estatus
+ORDER BY BaseDatos, Estatus;
+```
+
+Si hay registros con `Estatus=3`, revisar `UltimoError` antes de continuar.
+
+---
+
+### Paso 5 — Procesar el backfill completo
+
+```sql
+USE Checador;
+EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = NULL, @BatchSize = 500;
+-- Ejecutar varias veces hasta que no queden Estatus=0
+```
+
+---
+
+### Paso 6 — Crear los Agent Jobs
 
 ```sql
 -- Ejecutar en: msdb
 -- Script: prod_03_jobs_produccion.sql
 ```
 
-A partir de aquí el sistema es completamente automático. Los jobs corren a las 12:00, 16:00, 23:00 y martes 23:30.
+A partir de aquí el sistema es completamente automático.
+
+| Job                   | Horario          | `@TipoCorte` |
+|-----------------------|------------------|--------------|
+| `MB160_Corte_Entrada` | Diario 12:00     | `0`          |
+| `MB160_Corte_Comida`  | Diario 16:00     | `4`          |
+| `MB160_Corte_Salida`  | Diario 23:00     | `1`          |
+| `MB160_Corte_Semanal` | Martes 23:30     | `NULL`       |
 
 ---
 
