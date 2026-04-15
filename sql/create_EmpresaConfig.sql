@@ -15,9 +15,9 @@ BEGIN
     );
 
     INSERT INTO dbo.EmpresaConfig (EmpresaID, EmpresaPrefix, BaseDatos) VALUES
-    (2, '002', N'kingv7'),
-    (3, '003', N'obsidianav7'),
-    (4, '004', N'bbgv7'),
-    (5, '005', N'cotailordev');
+    (2, '2', N'kingv7'),
+    (3, '3', N'obsidianav7'),
+    (4, '4', N'bbgv7'),
+    (5, '5', N'cotailordev');
 END;
 GO
