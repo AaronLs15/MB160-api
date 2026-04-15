@@ -21,6 +21,7 @@ Incluye:
 ├── scripts/
 │   ├── run_api.py
 │   ├── run_collector.py
+│   ├── run_collector_multiple_apis.py  # multi checador (cada 5 min)
 │   ├── run_daily_pull.py       # ejecuta un pull unico (para cron)
 │   ├── run_scheduled_pull.py   # scheduler diario con bajo consumo
 │   ├── run_health_check.py
@@ -147,10 +148,17 @@ SQLSERVER_TRUST_CERT=yes
 
 # ---- MB160 ----
 MB160_IP=192.168.1.50
+MB160_IPS=192.168.1.50,192.168.1.51,192.168.1.52
 MB160_PORT=4370
 
 # ---- Attendance collector ----
 PULL_INTERVAL_SECONDS=60
+MULTI_PULL_INTERVAL_SECONDS=300
+MULTI_PULL_MAX_WORKERS=6
+
+# ---- MB160 test de conectividad multi-IP ----
+MB160_TEST_TIMEOUT_SECONDS=10
+MB160_TEST_MAX_WORKERS=8
 
 # ---- User sync worker ----
 USER_SYNC_INTERVAL_SECONDS=10
@@ -197,6 +205,7 @@ Smoke tests (con `.env` listo):
 ```bash
 python scripts/run_health_check.py
 python tests/test_db_insert.py
+python tests/test_mb160_connections_multi.py
 ```
 
 Salida esperada:
@@ -204,6 +213,7 @@ Salida esperada:
 * `OK: DB=...`
 * `OK: insert 1 realizado`
 * `OK: deduplicación funciona (IntegrityError por UNIQUE)`
+* Para conectividad multi-IP: `Resumen: total=... ok=... fail=...`
 
 ---
 
@@ -246,7 +256,32 @@ Logs: `logs/service.log`
 
 ---
 
-## 5.1) Ejecucion programada diaria (8pm)
+## 5.1) Collector multiple checadores (22 IPs)
+
+Si vas a correr en servidor Windows y quieres bajar carga, usa el collector multi-IP cada 5 minutos:
+
+```bash
+python scripts/run_collector_multiple_apis.py
+```
+
+Variables en `.env`:
+
+```env
+MB160_IPS=192.168.1.50,192.168.1.51,...,192.168.1.71
+MB160_PORT=4370
+MULTI_PULL_INTERVAL_SECONDS=300
+MULTI_PULL_MAX_WORKERS=6
+```
+
+Notas:
+
+* Si `MB160_IPS` no está definido, usa `MB160_IP` como fallback.
+* `MULTI_PULL_MAX_WORKERS` controla cuántas conexiones simultáneas hace el servidor.
+* Mantener `MULTI_PULL_INTERVAL_SECONDS=300` reduce uso de CPU/red frente al collector cada 60s.
+
+---
+
+## 5.2) Ejecucion programada diaria (8pm)
 
 Si no quieres el collector corriendo todo el tiempo, usa el runner de una sola ejecucion:
 

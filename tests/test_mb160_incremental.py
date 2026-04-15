@@ -9,7 +9,7 @@ IP = os.environ.get("MB160_IP", "192.168.2.13")
 PORT = int(os.environ.get("MB160_PORT", "4370"))
 
 # Simula “último timestamp guardado”
-LAST_TS = datetime(2025, 12, 1, 0, 0, 0)
+LAST_TS = datetime(2026, 1, 16, 12, 1, 25)
 
 def main():
     zk = ZK(IP, port=PORT, timeout=10, password=0)

@@ -86,14 +86,23 @@ def _build_user_map(conn_dev) -> Dict[str, str]:
     retry=retry_if_exception_type((OperationalError, OSError, TimeoutError)),
     reraise=True,
 )
-def poll_once(engine) -> None:
-    if not MB160_IP:
-        raise RuntimeError("MB160_IP no está definido en .env")
+def poll_once(
+    engine,
+    *,
+    min_ts: Optional[datetime] = None,
+    use_last_ts: bool = True,
+    device_ip: Optional[str] = None,
+    device_port: Optional[int] = None,
+) -> None:
+    target_ip = (device_ip or MB160_IP or "").strip()
+    target_port = int(device_port or MB160_PORT)
+    if not target_ip:
+        raise RuntimeError("No hay IP de MB160 configurada (MB160_IP o device_ip)")
 
     # Import local para no romper si aún no instalas pyzk en algunos ambientes
     from zk import ZK  # type: ignore
 
-    zk = ZK(MB160_IP, port=MB160_PORT, timeout=10, password=0)
+    zk = ZK(target_ip, port=target_port, timeout=10, password=0)
     conn_dev = None
 
     try:
@@ -105,9 +114,9 @@ def poll_once(engine) -> None:
             pass
 
         try:
-            device_serial = conn_dev.get_serialnumber() or MB160_IP
+            device_serial = conn_dev.get_serialnumber() or target_ip
         except Exception:
-            device_serial = MB160_IP
+            device_serial = target_ip
 
         # ===== NUEVO: mapa user_id -> name =====
         user_map = _build_user_map(conn_dev)
@@ -115,7 +124,7 @@ def poll_once(engine) -> None:
         logs = conn_dev.get_attendance() or []
 
         with engine.begin() as dbconn:
-            last_ts = _get_last_ts(dbconn, device_serial)
+            last_ts = _get_last_ts(dbconn, device_serial) if use_last_ts else None
 
             inserted = 0
             dup_skipped = 0
@@ -125,6 +134,8 @@ def poll_once(engine) -> None:
                 if ts is None:
                     continue
 
+                if min_ts is not None and ts < min_ts:
+                    continue
                 # incremental
                 if last_ts is not None and ts <= last_ts:
                     continue
@@ -140,7 +151,7 @@ def poll_once(engine) -> None:
                     _insert_mark(
                         dbconn,
                         device_serial=device_serial,
-                        device_ip=MB160_IP,
+                        device_ip=target_ip,
                         user_id=user_id,
                         user_name=user_name,
                         ts_local=ts,
@@ -152,10 +163,16 @@ def poll_once(engine) -> None:
                 except IntegrityError:
                     dup_skipped += 1
 
-            log.info(
-                "Poll OK | device=%s | logs=%d | inserted=%d | dup_skipped=%d | last_ts=%s",
-                device_serial, len(logs), inserted, dup_skipped, last_ts
-            )
+            if min_ts is None:
+                log.info(
+                    "Poll OK | device=%s | ip=%s | logs=%d | inserted=%d | dup_skipped=%d | last_ts=%s",
+                    device_serial, target_ip, len(logs), inserted, dup_skipped, last_ts
+                )
+            else:
+                log.info(
+                    "Poll OK | device=%s | ip=%s | logs=%d | inserted=%d | dup_skipped=%d | min_ts=%s",
+                    device_serial, target_ip, len(logs), inserted, dup_skipped, min_ts
+                )
 
     finally:
         if conn_dev:
