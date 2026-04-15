@@ -29,13 +29,16 @@ SET @FechaHasta = ISNULL(@FechaHasta, SYSDATETIME());
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Cuántos registros hay en el rango ANTES de encolar (info)
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Formato real: primer dígito = empresa ('5' = cotailordev), resto = PersonaID
+-- Ejemplo: '50076' → empresa 5 (cotailordev), PersonaID 76
 SELECT
     Punch,
     CASE Punch WHEN 0 THEN 'Entrada' WHEN 1 THEN 'Salida' WHEN 4 THEN 'Comida' ELSE 'Ignorado' END AS Tipo,
     COUNT(*) AS Total
 FROM dbo.AsistenciaMarcaje
-WHERE LEFT(UsuarioDispositivo, 3) = '005'
-  AND LEN(UsuarioDispositivo)    = 9
+WHERE LEFT(UsuarioDispositivo, 1) = '5'
+  AND LEN(UsuarioDispositivo)    >= 2
+  AND ISNUMERIC(UsuarioDispositivo) = 1
   AND EventoFechaHora BETWEEN @FechaDesde AND @FechaHasta
 GROUP BY Punch
 ORDER BY Punch;
@@ -47,19 +50,20 @@ INSERT INTO dbo.MarcajeDispatchQueue
     (AsistenciaMarcajeID, EmpresaID, BaseDatos, PersonaID, Punch, EventoFechaHora)
 SELECT
     am.AsistenciaMarcajeID,
-    CAST(LEFT(am.UsuarioDispositivo, 3) AS INT)  AS EmpresaID,
+    CAST(LEFT(am.UsuarioDispositivo, 1) AS INT)                              AS EmpresaID,
     ec.BaseDatos,
-    CAST(RIGHT(am.UsuarioDispositivo, 6) AS INT) AS PersonaID,
+    CAST(SUBSTRING(am.UsuarioDispositivo, 2, LEN(am.UsuarioDispositivo)) AS INT) AS PersonaID,
     am.Punch,
     am.EventoFechaHora
 FROM dbo.AsistenciaMarcaje am
 INNER JOIN dbo.EmpresaConfig ec
-    ON  ec.EmpresaPrefix = LEFT(am.UsuarioDispositivo, 3)
+    ON  ec.EmpresaPrefix = LEFT(am.UsuarioDispositivo, 1)
     AND ec.Activo        = 1
 LEFT JOIN dbo.MarcajeDispatchQueue q
     ON q.AsistenciaMarcajeID = am.AsistenciaMarcajeID
 WHERE am.Punch IN (0, 1, 4)
-  AND LEN(am.UsuarioDispositivo)  = 9
+  AND LEN(am.UsuarioDispositivo)  >= 2
+  AND ISNUMERIC(am.UsuarioDispositivo) = 1
   AND am.EventoFechaHora BETWEEN @FechaDesde AND @FechaHasta
   AND q.MarcajeDispatchQueueID IS NULL;  -- no duplicar los que ya estén en cola
 

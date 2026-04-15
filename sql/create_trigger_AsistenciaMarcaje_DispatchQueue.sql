@@ -5,31 +5,28 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    -- Solo se encolan los Punch que corresponden a un tipo de registro válido:
-    --   0 = Entrada
-    --   1 = Salida
-    --   4 = Comida
-    -- Los demás valores (2, 3, 5, etc.) se ignoran silenciosamente.
+    -- Formato real de UsuarioDispositivo: primer dígito = empresa, resto = PersonaID
+    -- Ejemplos: '50076' → empresa 5 (cotailordev), PersonaID 76
+    --           '212345' → empresa 2 (kingv7), PersonaID 12345
     --
-    -- El JOIN con EmpresaConfig filtra marcajes cuyo prefijo de empresa
-    -- no exista o esté inactivo (p. ej. dispositivos de prueba, etc.).
-    --
-    -- LEN = 9 descarta IDs mal formados antes de intentar el CAST.
+    -- Solo se encolan Punch válidos: 0=Entrada, 1=Salida, 4=Comida.
+    -- El JOIN con EmpresaConfig filtra empresas desconocidas o inactivas.
 
     INSERT INTO dbo.MarcajeDispatchQueue
         (AsistenciaMarcajeID, EmpresaID, BaseDatos, PersonaID, Punch, EventoFechaHora)
     SELECT
         i.AsistenciaMarcajeID,
-        CAST(LEFT(i.UsuarioDispositivo, 3) AS INT)  AS EmpresaID,
+        CAST(LEFT(i.UsuarioDispositivo, 1) AS INT)                          AS EmpresaID,
         ec.BaseDatos,
-        CAST(RIGHT(i.UsuarioDispositivo, 6) AS INT) AS PersonaID,
+        CAST(SUBSTRING(i.UsuarioDispositivo, 2, LEN(i.UsuarioDispositivo))  AS INT) AS PersonaID,
         i.Punch,
         i.EventoFechaHora
     FROM inserted i
     INNER JOIN dbo.EmpresaConfig ec
-        ON  ec.EmpresaPrefix = LEFT(i.UsuarioDispositivo, 3)
+        ON  ec.EmpresaPrefix = LEFT(i.UsuarioDispositivo, 1)
         AND ec.Activo = 1
     WHERE i.Punch IN (0, 1, 4)
-      AND LEN(i.UsuarioDispositivo) = 9;
+      AND LEN(i.UsuarioDispositivo) >= 2     -- al menos 1 dígito empresa + 1 de PersonaID
+      AND ISNUMERIC(i.UsuarioDispositivo) = 1;  -- descartar IDs no numéricos
 END;
 GO

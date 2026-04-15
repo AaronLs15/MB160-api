@@ -46,7 +46,7 @@ BEGIN
     (
         EmpresaConfigID  INT          IDENTITY(1,1) NOT NULL,
         EmpresaID        INT          NOT NULL,
-        EmpresaPrefix    CHAR(3)      NOT NULL,
+        EmpresaPrefix    CHAR(1)      NOT NULL,         -- primer dígito de UsuarioDispositivo: '2','3','4','5'
         BaseDatos        SYSNAME      NOT NULL,
         Activo           BIT          NOT NULL CONSTRAINT DF_EmpresaConfig_Activo    DEFAULT(1),
         FechaRegistro    DATETIME2(3) NOT NULL CONSTRAINT DF_EmpresaConfig_FechaReg  DEFAULT(SYSDATETIME()),
@@ -60,14 +60,15 @@ ELSE
     PRINT '✓ Tabla EmpresaConfig ya existe';
 
 -- Insertar/actualizar las 4 empresas.
--- Activo=1 SOLO para cotailordev (prefijo 005).
+-- Activo=1 SOLO para cotailordev (prefijo '5').
 -- Las otras 3 se agregan con Activo=0 para tenerlas listas cuando pase a producción.
+-- Formato real en dispositivo: primer dígito = empresa  (ej. '50076' → empresa 5, PersonaID 76)
 MERGE dbo.EmpresaConfig AS t
 USING (VALUES
-    (2, '002', N'kingv7',       0),
-    (3, '003', N'obsidianav7',  0),
-    (4, '004', N'bbgv7',        0),
-    (5, '005', N'cotailordev',  1)   -- ← ÚNICO activo en el piloto
+    (2, '2', N'kingv7',       0),
+    (3, '3', N'obsidianav7',  0),
+    (4, '4', N'bbgv7',        0),
+    (5, '5', N'cotailordev',  1)   -- ← ÚNICO activo en el piloto
 ) AS s (EmpresaID, EmpresaPrefix, BaseDatos, Activo)
 ON t.EmpresaPrefix = s.EmpresaPrefix
 WHEN MATCHED THEN
@@ -76,7 +77,7 @@ WHEN NOT MATCHED THEN
     INSERT (EmpresaID, EmpresaPrefix, BaseDatos, Activo)
     VALUES (s.EmpresaID, s.EmpresaPrefix, s.BaseDatos, s.Activo);
 
-PRINT '✓ EmpresaConfig: cotailordev (005) activo, otras 3 inactivas';
+PRINT '✓ EmpresaConfig: cotailordev (5) activo, otras 3 inactivas';
 GO
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -120,21 +121,24 @@ AFTER INSERT
 AS
 BEGIN
     SET NOCOUNT ON;
+    -- Formato real: primer dígito = empresa, resto = PersonaID
+    -- Ejemplo: '50076' → empresa '5' (cotailordev), PersonaID 76
     INSERT INTO dbo.MarcajeDispatchQueue
         (AsistenciaMarcajeID, EmpresaID, BaseDatos, PersonaID, Punch, EventoFechaHora)
     SELECT
         i.AsistenciaMarcajeID,
-        CAST(LEFT(i.UsuarioDispositivo, 3) AS INT)  AS EmpresaID,
+        CAST(LEFT(i.UsuarioDispositivo, 1) AS INT)                              AS EmpresaID,
         ec.BaseDatos,
-        CAST(RIGHT(i.UsuarioDispositivo, 6) AS INT) AS PersonaID,
+        CAST(SUBSTRING(i.UsuarioDispositivo, 2, LEN(i.UsuarioDispositivo)) AS INT) AS PersonaID,
         i.Punch,
         i.EventoFechaHora
     FROM inserted i
     INNER JOIN dbo.EmpresaConfig ec
-        ON  ec.EmpresaPrefix = LEFT(i.UsuarioDispositivo, 3)
-        AND ec.Activo = 1                    -- solo empresas activas
+        ON  ec.EmpresaPrefix = LEFT(i.UsuarioDispositivo, 1)
+        AND ec.Activo = 1
     WHERE i.Punch IN (0, 1, 4)
-      AND LEN(i.UsuarioDispositivo) = 9;
+      AND LEN(i.UsuarioDispositivo) >= 2
+      AND ISNUMERIC(i.UsuarioDispositivo) = 1;
 END;
 GO
 PRINT '✓ Trigger tr_AsistenciaMarcaje_DispatchQueue creado/actualizado';
