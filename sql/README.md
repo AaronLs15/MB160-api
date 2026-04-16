@@ -29,16 +29,32 @@ Checador.dbo.AsistenciaMarcaje  ──INSERT──►  TRIGGER
 
 ---
 
-## Clasificación de Registro por hora del evento
+## Modelo de movimientos
 
-El campo `AsisteD.Registro` se asigna según la **hora del marcaje**, no el valor Punch del dispositivo:
+Por cada empleado y día se generan **hasta 4 movimientos** en `Asiste`, cada uno con sus renglones
+en `AsisteD` (un renglón por marcaje del checador dentro de esa ventana).
 
-| Ventana horaria       | `Registro` en AsisteD | `@TipoCorte` del job |
-|-----------------------|-----------------------|----------------------|
-| `< 12:00:00`          | `'Entrada'`           | `0`                  |
-| `12:00:00 – 12:49:59` | Descartado (Estatus=4)| —                    |
-| `12:50:00 – 15:59:59` | `'Comida'`            | `4`                  |
-| `>= 16:00:00`         | `'Salida'`            | `1`                  |
+```
+Asiste (Mov='Entrada')       → AsisteD: todos los marcajes < 12:00
+Asiste (Mov='SalidaComida')  → AsisteD: 1er marcaje en 12:50–15:59
+Asiste (Mov='EntradaComida') → AsisteD: 2do marcaje en 12:50–15:59
+Asiste (Mov='Salida')        → AsisteD: todos los marcajes >= 16:00
+```
+
+`AsisteD.Registro` = mismo valor que `Asiste.Mov` del encabezado.
+
+### Clasificación de TipoMov por hora del evento
+
+| Ventana horaria       | `Asiste.Mov` / `AsisteD.Registro` | Condición adicional          | `@TipoCorte` del job |
+|-----------------------|-----------------------------------|------------------------------|----------------------|
+| `< 12:00:00`          | `'Entrada'`                       | —                            | `0`                  |
+| `12:00:00 – 12:49:59` | Descartado (Estatus=4)            | Zona gris, sin categoría     | —                    |
+| `12:50:00 – 15:59:59` | `'SalidaComida'`                  | 1er marcaje del empleado+día | `4`                  |
+| `12:50:00 – 15:59:59` | `'EntradaComida'`                 | 2do marcaje del empleado+día | `4`                  |
+| `12:50:00 – 15:59:59` | Descartado (Estatus=4)            | 3er+ marcaje → excedente     | —                    |
+| `>= 16:00:00`         | `'Salida'`                        | —                            | `1`                  |
+
+La posición (1ro/2do) se calcula con `ROW_NUMBER()` particionado por `(BaseDatos, PersonaID, DATE(EventoFechaHora))` ordenado por hora.
 
 ---
 
@@ -108,7 +124,9 @@ EXEC dbo.sp_ProcessMarcajeQueue
 
 Usa `READPAST + UPDLOCK + ROWLOCK` para procesar concurrentemente sin duplicados.  
 Captura `AsisteID` con `OUTPUT INSERTED.ID` (no `SCOPE_IDENTITY`).  
-`Renglon` en AsisteD = `MAX(Renglon)+1` global de toda la tabla.
+`Renglon` en AsisteD = `MAX(Renglon)+1` global de toda la tabla.  
+Cada grupo (empleado+día+TipoMov) se procesa en **transacción explícita** — si falla algún paso, Asiste+AsisteD se revierten y los registros del grupo quedan en Estatus=3 (reintentable).  
+Post-`spAfectar`: valida que `Asiste.MovID` no sea NULL; si lo es, fuerza Estatus=3 en lugar de Hecho.
 
 ---
 

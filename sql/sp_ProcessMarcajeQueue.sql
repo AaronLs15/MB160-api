@@ -1,29 +1,33 @@
 CREATE OR ALTER PROCEDURE dbo.sp_ProcessMarcajeQueue
     @TipoCorte TINYINT = NULL,   -- Ventana horaria a procesar:
-                                  --   0 = Entrada  (< 12:00)
-                                  --   4 = Comida   (12:50 – 15:59)
-                                  --   1 = Salida   (>= 16:00)
+                                  --   0 = Entrada        (< 12:00)
+                                  --   4 = Comida         (12:50 – 15:59) → genera SalidaComida y EntradaComida
+                                  --   1 = Salida         (>= 16:00)
                                   -- NULL = todas las ventanas (corte semanal)
     @BatchSize INT     = 200
 AS
 /*
     Orquestador de despacho de marcajes MB160 → ERPs (misma instancia SQL Server).
-    Invocado por los SQL Agent Jobs de corte de asistencia (Regla 6):
-      - 12:00 → Corte de Entrada  (EXEC sp_ProcessMarcajeQueue @TipoCorte = 0)
-      - 16:00 → Corte de Comida   (EXEC sp_ProcessMarcajeQueue @TipoCorte = 4)
-      - 23:00 → Corte de Salida   (EXEC sp_ProcessMarcajeQueue @TipoCorte = 1)
+    Invocado por los SQL Agent Jobs de corte de asistencia.
 
-    Clasificación de Registro por hora del evento (no por Punch del dispositivo):
-      < 12:00:00              → 'Entrada'
-      12:00:00 – 12:49:59     → Descartado (zona gris, sin categoría — Estatus=4)
-      12:50:00 – 15:59:59     → 'Comida'
-      >= 16:00:00             → 'Salida'
+    Modelo: 1 Asiste por (empleado, día, TipoMov). Múltiples renglones AsisteD
+    por Asiste (uno por marcaje del checador dentro de esa ventana/día).
 
-    Fixes aplicados:
-      - CodigoEmpresa se lee de dbo.EmpresaConfig (no con SELECT dinámico al ERP).
-      - AsisteID se captura con OUTPUT INSERTED.ID (no SCOPE_IDENTITY, que falla
-        cuando el ID de Asiste es manejado por el ERP y no es un IDENTITY de SQL).
-      - Renglon es consecutivo GLOBAL de toda la tabla AsisteD (sin filtro por ID).
+    Clasificación de TipoMov por hora del evento:
+      < 12:00:00              → Asiste.Mov = 'Entrada'
+      12:00:00 – 12:49:59     → Descartado (zona gris, Estatus=4)
+      12:50:00 – 15:59:59     → 1er marcaje del empleado en el día → 'SalidaComida'
+                                 2do marcaje → 'EntradaComida'
+                                 3er+ → Descartado (Estatus=4)
+      >= 16:00:00             → Asiste.Mov = 'Salida'
+
+    AsisteD.Registro = Asiste.Mov del encabezado.
+
+    Flujo por grupo (BaseDatos, PersonaID, Fecha, TipoMov):
+      INSERT Asiste (1 por grupo) → INSERT AsisteD (N renglones) → spAfectar → validar MovID
+
+    Atomicidad: cada grupo se procesa en una transacción explícita.
+    Si falla, todos los registros del grupo vuelven a Estatus=3 (reintentable).
 
     Estatus: 0=Pendiente 1=Procesando 2=Hecho 3=Error(reintentable) 4=Descartado
 */
@@ -40,10 +44,11 @@ BEGIN
         AsistenciaMarcajeID    BIGINT,
         BaseDatos              SYSNAME,
         EmpresaID              INT,
-        CodigoEmpresa          NVARCHAR(50),   -- leído de EmpresaConfig
+        CodigoEmpresa          NVARCHAR(50),
         PersonaID              INT,
         Punch                  TINYINT,
-        EventoFechaHora        DATETIME2(0)
+        EventoFechaHora        DATETIME2(0),
+        TipoMov                NVARCHAR(20)    -- asignado en paso 2
     );
 
     ;WITH cte AS (
@@ -67,10 +72,11 @@ BEGIN
         inserted.AsistenciaMarcajeID,
         inserted.BaseDatos,
         inserted.EmpresaID,
-        ec.CodigoEmpresa,            -- ← viene de EmpresaConfig, no del ERP
+        ec.CodigoEmpresa,
         inserted.PersonaID,
         inserted.Punch,
-        inserted.EventoFechaHora
+        inserted.EventoFechaHora,
+        NULL    -- TipoMov: se asigna en paso 2
     INTO @batch
     FROM dbo.MarcajeDispatchQueue q
     INNER JOIN cte ON cte.MarcajeDispatchQueueID = q.MarcajeDispatchQueueID
@@ -79,83 +85,110 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
     -- -------------------------------------------------------------------------
-    -- 2. Descartar marcajes en zona gris 12:00–12:49:59 (sin categoría horaria)
-    --    Solo aplica cuando @TipoCorte IS NULL (corte semanal que toma todo)
+    -- 2. Clasificar TipoMov en @batch
+    --    2a. Clasificación base por ventana horaria
+    -- -------------------------------------------------------------------------
+    UPDATE @batch
+    SET TipoMov =
+        CASE
+            WHEN CAST(EventoFechaHora AS TIME) < '12:00:00' THEN N'Entrada'
+            WHEN CAST(EventoFechaHora AS TIME) < '12:50:00' THEN N'ZONAGRIS'
+            WHEN CAST(EventoFechaHora AS TIME) < '16:00:00' THEN N'COMIDA_TBD'
+            ELSE                                                  N'Salida'
+        END;
+
+    -- 2b. Split ventana comida: ROW_NUMBER por (DB, empleado, día) ordenado por hora.
+    --     1er registro → 'SalidaComida' | 2do → 'EntradaComida' | 3ro+ → 'DESCARTAR'
+    ;WITH comida AS (
+        SELECT MarcajeDispatchQueueID,
+               ROW_NUMBER() OVER (
+                   PARTITION BY BaseDatos, PersonaID, CAST(EventoFechaHora AS DATE)
+                   ORDER BY EventoFechaHora
+               ) AS rn
+        FROM @batch
+        WHERE TipoMov = N'COMIDA_TBD'
+    )
+    UPDATE b
+    SET b.TipoMov = CASE
+        WHEN c.rn = 1 THEN N'SalidaComida'
+        WHEN c.rn = 2 THEN N'EntradaComida'
+        ELSE               N'DESCARTAR'
+    END
+    FROM @batch b
+    INNER JOIN comida c ON c.MarcajeDispatchQueueID = b.MarcajeDispatchQueueID;
+
+    -- -------------------------------------------------------------------------
+    -- 3. Descartar zona gris (12:00–12:49) y excedente comida (3ro en adelante)
     -- -------------------------------------------------------------------------
     UPDATE dbo.MarcajeDispatchQueue
     SET Estatus      = 4,
-        UltimoError  = N'Marcaje en zona sin categoría (12:00–12:49). No corresponde a ningún corte.',
+        UltimoError  = CASE b.TipoMov
+            WHEN N'ZONAGRIS'  THEN N'Marcaje en zona sin categoría (12:00–12:49). No corresponde a ningún corte.'
+            WHEN N'DESCARTAR' THEN N'Más de 2 registros en ventana comida (12:50–15:59) para este empleado en el día. Tercero en adelante descartado.'
+        END,
         UltimoCambio = SYSDATETIME()
-    WHERE MarcajeDispatchQueueID IN (
-        SELECT MarcajeDispatchQueueID FROM @batch
-        WHERE CAST(EventoFechaHora AS TIME) >= '12:00:00'
-          AND CAST(EventoFechaHora AS TIME) <  '12:50:00'
-    );
+    FROM dbo.MarcajeDispatchQueue mdq
+    INNER JOIN @batch b ON b.MarcajeDispatchQueueID = mdq.MarcajeDispatchQueueID
+    WHERE b.TipoMov IN (N'ZONAGRIS', N'DESCARTAR');
 
-    DELETE FROM @batch
-    WHERE CAST(EventoFechaHora AS TIME) >= '12:00:00'
-      AND CAST(EventoFechaHora AS TIME) <  '12:50:00';
+    DELETE FROM @batch WHERE TipoMov IN (N'ZONAGRIS', N'DESCARTAR');
 
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
     -- -------------------------------------------------------------------------
-    -- 3. Procesar registro por registro
+    -- 4. Procesar por grupos (BaseDatos, EmpresaID, PersonaID, Fecha, TipoMov)
+    --    Un Asiste por grupo + múltiples AsisteD + spAfectar
+    --    Cada grupo corre en su propia transacción para atomicidad.
     -- -------------------------------------------------------------------------
     DECLARE
+        -- Cursor externo (grupo)
+        @GrpDB        SYSNAME,
+        @GrpEmpresaID INT,
+        @GrpCode      NVARCHAR(50),
+        @GrpPersonaID INT,
+        @GrpFecha     DATE,
+        @GrpTipoMov   NVARCHAR(20),
+        -- Cursor interno (marcaje individual)
         @QueueID      BIGINT,
         @MarcajeID    BIGINT,
-        @DB           SYSNAME,
-        @EmpresaID    INT,
-        @EmpresaCode  NVARCHAR(50),
-        @PersonaID    INT,
-        @PunchVal     TINYINT,
         @FechaEvento  DATETIME2(0),
+        @HoraStr      NCHAR(5),
+        -- Compartidas
         @SQL          NVARCHAR(MAX),
         @Params       NVARCHAR(MAX),
         @AsisteID     INT,
-        @TipoRegistro NVARCHAR(20),
-        @HoraEvento   TIME,
-        @HoraStr      NCHAR(5),
         @MovIDPost    NVARCHAR(50),
         @ErrMsg       NVARCHAR(4000);
 
-    DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
-        SELECT MarcajeDispatchQueueID, AsistenciaMarcajeID, BaseDatos,
-               EmpresaID, CodigoEmpresa, PersonaID, Punch, EventoFechaHora
+    DECLARE curGrupos CURSOR LOCAL FAST_FORWARD FOR
+        SELECT DISTINCT
+               BaseDatos,
+               EmpresaID,
+               CodigoEmpresa,
+               PersonaID,
+               CAST(EventoFechaHora AS DATE) AS Fecha,
+               TipoMov
         FROM @batch
-        ORDER BY MarcajeDispatchQueueID;
+        ORDER BY BaseDatos, PersonaID, CAST(EventoFechaHora AS DATE), TipoMov;
 
-    OPEN cur;
-    FETCH NEXT FROM cur INTO
-        @QueueID, @MarcajeID, @DB, @EmpresaID, @EmpresaCode,
-        @PersonaID, @PunchVal, @FechaEvento;
+    OPEN curGrupos;
+    FETCH NEXT FROM curGrupos INTO
+        @GrpDB, @GrpEmpresaID, @GrpCode, @GrpPersonaID, @GrpFecha, @GrpTipoMov;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
         BEGIN TRY
-
-            -- Clasificar por hora del evento (Punch del dispositivo es solo referencia)
-            SET @HoraEvento = CAST(@FechaEvento AS TIME);
-
-            SET @TipoRegistro = CASE
-                WHEN @HoraEvento <  '12:00:00'                             THEN N'Entrada'
-                WHEN @HoraEvento >= '12:50:00' AND @HoraEvento < '16:00:00' THEN N'Comida'
-                WHEN @HoraEvento >= '16:00:00'                             THEN N'Salida'
-                ELSE NULL   -- zona gris ya descartada en el paso 2
-            END;
-
-            SET @HoraStr = CONVERT(NCHAR(5), @HoraEvento, 108);
+            BEGIN TRANSACTION;
 
             -- ------------------------------------------------------------------
-            -- 3a. INSERT en Asiste + captura de ID con OUTPUT INSERTED.ID
-            --     MovID se omite — spAfectar genera el folio real.
-            --     (no se usa SCOPE_IDENTITY porque el ID puede ser manejado
-            --      por el ERP con lógica propia, no como IDENTITY de SQL Server)
+            -- 4a. INSERT en Asiste (1 por grupo)
+            --     Mov = TipoMov del grupo | MovID lo genera spAfectar
             -- ------------------------------------------------------------------
+            SET @AsisteID = NULL;
             SET @SQL = N'
                 DECLARE @ids TABLE (ID INT);
 
-                INSERT INTO [' + @DB + N'].dbo.Asiste
+                INSERT INTO [' + @GrpDB + N'].dbo.Asiste
                 (
                     Empresa, Mov,
                     FechaEmision, FechaAplicacion,
@@ -170,8 +203,8 @@ BEGIN
                 OUTPUT INSERTED.ID INTO @ids
                 VALUES
                 (
-                    @EmpresaCode, ''Registro'',
-                    CAST(@Fecha AS DATE), CAST(@Fecha AS DATE),
+                    @EmpresaCode, @TipoMov,
+                    @Fecha, @Fecha,
                     ''SINAFECTAR'', ''INTELISIS'',
                     YEAR(@Fecha), MONTH(@Fecha),
                     SYSDATETIME(),
@@ -183,61 +216,80 @@ BEGIN
 
                 SELECT @AsisteID = ID FROM @ids;';
 
-            SET @Params = N'@EmpresaCode NVARCHAR(50), @Fecha DATETIME2(0), @AsisteID INT OUTPUT';
+            SET @Params = N'@EmpresaCode NVARCHAR(50), @TipoMov NVARCHAR(20), @Fecha DATE, @AsisteID INT OUTPUT';
             EXEC sp_executesql @SQL, @Params,
-                @EmpresaCode = @EmpresaCode,
-                @Fecha       = @FechaEvento,
+                @EmpresaCode = @GrpCode,
+                @TipoMov     = @GrpTipoMov,
+                @Fecha       = @GrpFecha,
                 @AsisteID    = @AsisteID OUTPUT;
 
-            -- Verificar que obtuvimos un ID válido antes de continuar
             IF @AsisteID IS NULL
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL — revisar si Asiste.ID es generado correctamente.', 16, 1);
 
             -- ------------------------------------------------------------------
-            -- 3b. INSERT en AsisteD
-            --     Debe existir ANTES de llamar a spAfectar.
-            --     Renglon: consecutivo GLOBAL de toda la tabla AsisteD.
-            --     Personal: UsuarioDispositivo completo como INT.
+            -- 4b. INSERT en AsisteD (un renglón por cada marcaje del grupo)
+            --     Registro = TipoMov del grupo (hereda el Mov del encabezado)
+            --     Renglon  = MAX global + 1 por cada inserción
             -- ------------------------------------------------------------------
-            SET @SQL = N'
-                DECLARE @renglon INT;
-                SELECT @renglon = ISNULL(MAX(Renglon), 0) + 1
-                FROM [' + @DB + N'].dbo.AsisteD;  -- global, sin filtro por ID
+            DECLARE curMarcajes CURSOR LOCAL FAST_FORWARD FOR
+                SELECT MarcajeDispatchQueueID, AsistenciaMarcajeID, EventoFechaHora
+                FROM @batch
+                WHERE BaseDatos                    = @GrpDB
+                  AND PersonaID                    = @GrpPersonaID
+                  AND CAST(EventoFechaHora AS DATE) = @GrpFecha
+                  AND TipoMov                      = @GrpTipoMov
+                ORDER BY EventoFechaHora;
 
-                INSERT INTO [' + @DB + N'].dbo.AsisteD
-                (
-                    ID, Renglon,
-                    Personal, Registro, HoraRegistro,
-                    FechaD, FechaA, Fecha,
-                    Sucursal,
-                    Logico1, Logico2, Logico3, Logico4, Logico5
-                )
-                VALUES
-                (
-                    @AsisteID, @renglon,
-                    @PersonaID, @TipoReg, @Hora,
-                    CAST(@Fecha AS DATE), CAST(@Fecha AS DATE), CAST(@Fecha AS DATE),
-                    1,
-                    0, 0, 0, 0, 0
-                );';
+            OPEN curMarcajes;
+            FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @FechaEvento;
 
-            SET @Params = N'@AsisteID INT, @PersonaID INT, @TipoReg NVARCHAR(20),
-                            @Hora NCHAR(5), @Fecha DATETIME2(0)';
-            EXEC sp_executesql @SQL, @Params,
-                @AsisteID  = @AsisteID,
-                @PersonaID = @PersonaID,
-                @TipoReg   = @TipoRegistro,
-                @Hora      = @HoraStr,
-                @Fecha     = @FechaEvento;
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                SET @HoraStr = CONVERT(NCHAR(5), CAST(@FechaEvento AS TIME), 108);
+
+                SET @SQL = N'
+                    DECLARE @renglon INT;
+                    SELECT @renglon = ISNULL(MAX(Renglon), 0) + 1
+                    FROM [' + @GrpDB + N'].dbo.AsisteD;  -- global, sin filtro por ID
+
+                    INSERT INTO [' + @GrpDB + N'].dbo.AsisteD
+                    (
+                        ID, Renglon,
+                        Personal, Registro, HoraRegistro,
+                        FechaD, FechaA, Fecha,
+                        Sucursal,
+                        Logico1, Logico2, Logico3, Logico4, Logico5
+                    )
+                    VALUES
+                    (
+                        @AsisteID, @renglon,
+                        @PersonaID, @TipoMov, @Hora,
+                        @Fecha, @Fecha, @Fecha,
+                        1,
+                        0, 0, 0, 0, 0
+                    );';
+
+                SET @Params = N'@AsisteID INT, @PersonaID INT, @TipoMov NVARCHAR(20),
+                                @Hora NCHAR(5), @Fecha DATE';
+                EXEC sp_executesql @SQL, @Params,
+                    @AsisteID  = @AsisteID,
+                    @PersonaID = @GrpPersonaID,
+                    @TipoMov   = @GrpTipoMov,
+                    @Hora      = @HoraStr,
+                    @Fecha     = @GrpFecha;
+
+                FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @FechaEvento;
+            END;
+
+            CLOSE curMarcajes; DEALLOCATE curMarcajes;
 
             -- ------------------------------------------------------------------
-            -- 3c. Afectar el movimiento en el ERP
+            -- 4c. Afectar el movimiento en el ERP
             --     spAfectar genera MovID (folio real) y pone Estatus='PROCESAR'.
-            --     'PROCESAR' es el estado final esperado en Intelisis para este flujo.
             --     AsisteD ya existe antes de esta llamada (requerido por spAfectar).
             -- ------------------------------------------------------------------
             SET @SQL = N'
-                EXEC [' + @DB + N'].dbo.spAfectar
+                EXEC [' + @GrpDB + N'].dbo.spAfectar
                     ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'',
                     NULL, ''INTELISIS'',
                     @Estacion = 1, @ensilencio = 1;';
@@ -245,13 +297,12 @@ BEGIN
             EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID = @AsisteID;
 
             -- ------------------------------------------------------------------
-            -- 3c-bis. Validar que spAfectar generó el MovID
-            --         Con @ensilencio=1 los fallos son silenciosos; si MovID
-            --         sigue NULL el registro debe reintentarse (Estatus=3),
-            --         no marcarse como Hecho.
+            -- 4d. Validar que spAfectar generó el MovID
+            --     Con @ensilencio=1 los fallos son silenciosos; si MovID sigue
+            --     NULL el grupo debe reintentarse (Estatus=3), no marcarse Hecho.
             -- ------------------------------------------------------------------
             SET @MovIDPost = NULL;
-            SET @SQL = N'SELECT @MovIDPost = MovID FROM [' + @DB + N'].dbo.Asiste WHERE ID = @AsisteID;';
+            SET @SQL = N'SELECT @MovIDPost = MovID FROM [' + @GrpDB + N'].dbo.Asiste WHERE ID = @AsisteID;';
             EXEC sp_executesql @SQL,
                 N'@AsisteID INT, @MovIDPost NVARCHAR(50) OUTPUT',
                 @AsisteID  = @AsisteID,
@@ -261,7 +312,7 @@ BEGIN
                 RAISERROR(N'spAfectar no generó MovID para Asiste.ID=%d — se reintentará en el siguiente ciclo.', 16, 1, @AsisteID);
 
             -- ------------------------------------------------------------------
-            -- 3d. Marcar como Hecho
+            -- 4e. Marcar todo el grupo como Hecho + actualizar AsistenciaMarcaje
             -- ------------------------------------------------------------------
             UPDATE dbo.MarcajeDispatchQueue
             SET Estatus      = 2,
@@ -269,28 +320,55 @@ BEGIN
                 ProcesadoEn  = SYSDATETIME(),
                 UltimoError  = NULL,
                 UltimoCambio = SYSDATETIME()
-            WHERE MarcajeDispatchQueueID = @QueueID;
+            WHERE MarcajeDispatchQueueID IN (
+                SELECT MarcajeDispatchQueueID FROM @batch
+                WHERE BaseDatos                    = @GrpDB
+                  AND PersonaID                    = @GrpPersonaID
+                  AND CAST(EventoFechaHora AS DATE) = @GrpFecha
+                  AND TipoMov                      = @GrpTipoMov
+            );
 
             UPDATE dbo.AsistenciaMarcaje
             SET TieneMovimientos = 1
-            WHERE AsistenciaMarcajeID = @MarcajeID;
+            WHERE AsistenciaMarcajeID IN (
+                SELECT AsistenciaMarcajeID FROM @batch
+                WHERE BaseDatos                    = @GrpDB
+                  AND PersonaID                    = @GrpPersonaID
+                  AND CAST(EventoFechaHora AS DATE) = @GrpFecha
+                  AND TipoMov                      = @GrpTipoMov
+            );
+
+            COMMIT TRANSACTION;
 
         END TRY
         BEGIN CATCH
+            IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+
+            -- Cerrar cursor interno si quedó abierto por error dentro del loop
+            IF CURSOR_STATUS('local', 'curMarcajes') >= 0
+                CLOSE curMarcajes;
+            IF CURSOR_STATUS('local', 'curMarcajes') >= -1
+                DEALLOCATE curMarcajes;
+
             SET @ErrMsg = ERROR_MESSAGE();
             UPDATE dbo.MarcajeDispatchQueue
             SET Estatus      = 3,
                 UltimoError  = LEFT(@ErrMsg, 4000),
                 UltimoCambio = SYSDATETIME()
-            WHERE MarcajeDispatchQueueID = @QueueID;
+            WHERE MarcajeDispatchQueueID IN (
+                SELECT MarcajeDispatchQueueID FROM @batch
+                WHERE BaseDatos                    = @GrpDB
+                  AND PersonaID                    = @GrpPersonaID
+                  AND CAST(EventoFechaHora AS DATE) = @GrpFecha
+                  AND TipoMov                      = @GrpTipoMov
+            );
         END CATCH;
 
-        FETCH NEXT FROM cur INTO
-            @QueueID, @MarcajeID, @DB, @EmpresaID, @EmpresaCode,
-            @PersonaID, @PunchVal, @FechaEvento;
+        FETCH NEXT FROM curGrupos INTO
+            @GrpDB, @GrpEmpresaID, @GrpCode, @GrpPersonaID, @GrpFecha, @GrpTipoMov;
     END;
 
-    CLOSE cur;
-    DEALLOCATE cur;
+    CLOSE curGrupos;
+    DEALLOCATE curGrupos;
 END;
 GO
