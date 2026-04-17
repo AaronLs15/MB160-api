@@ -252,8 +252,9 @@ BEGIN
 
     DECLARE
         @GrpDB        SYSNAME,   @GrpEmpresaID INT,  @GrpCode NVARCHAR(50),
-        @GrpPersonaID INT,       @GrpFecha DATE,     @GrpTipoMov NVARCHAR(20),
+        @GrpFecha DATE,          @GrpTipoMov NVARCHAR(20),
         @GrpRegistroCorto NVARCHAR(10),
+        @InnerPersonaID INT,
         @QueueID      BIGINT,    @MarcajeID BIGINT,  @FechaEvento DATETIME2(0),
         @HoraStr      NCHAR(5),
         @SQL          NVARCHAR(MAX), @Params NVARCHAR(MAX),
@@ -261,13 +262,13 @@ BEGIN
         @ErrMsg       NVARCHAR(4000);
 
     DECLARE curGrupos CURSOR LOCAL FAST_FORWARD FOR
-        SELECT DISTINCT BaseDatos, EmpresaID, CodigoEmpresa, PersonaID,
+        SELECT DISTINCT BaseDatos, EmpresaID, CodigoEmpresa,
                CAST(EventoFechaHora AS DATE), TipoMov
         FROM @batch
-        ORDER BY BaseDatos, PersonaID, CAST(EventoFechaHora AS DATE), TipoMov;
+        ORDER BY BaseDatos, CAST(EventoFechaHora AS DATE), TipoMov;
 
     OPEN curGrupos;
-    FETCH NEXT FROM curGrupos INTO @GrpDB, @GrpEmpresaID, @GrpCode, @GrpPersonaID, @GrpFecha, @GrpTipoMov;
+    FETCH NEXT FROM curGrupos INTO @GrpDB, @GrpEmpresaID, @GrpCode, @GrpFecha, @GrpTipoMov;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
@@ -305,16 +306,16 @@ BEGIN
             IF @AsisteID IS NULL
                 RAISERROR(N'OUTPUT INSERTED.ID regresó NULL.', 16, 1);
 
-            -- INSERT AsisteD: un renglón por cada marcaje del grupo
+            -- INSERT AsisteD: un renglón por cada marcaje del grupo (todos los empleados)
             DECLARE curMarcajes CURSOR LOCAL FAST_FORWARD FOR
-                SELECT MarcajeDispatchQueueID, AsistenciaMarcajeID, EventoFechaHora
+                SELECT MarcajeDispatchQueueID, AsistenciaMarcajeID, PersonaID, EventoFechaHora
                 FROM @batch
-                WHERE BaseDatos = @GrpDB AND PersonaID = @GrpPersonaID
+                WHERE BaseDatos = @GrpDB
                   AND CAST(EventoFechaHora AS DATE) = @GrpFecha AND TipoMov = @GrpTipoMov
                 ORDER BY EventoFechaHora;
 
             OPEN curMarcajes;
-            FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @FechaEvento;
+            FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @InnerPersonaID, @FechaEvento;
 
             WHILE @@FETCH_STATUS = 0
             BEGIN
@@ -329,10 +330,10 @@ BEGIN
                             @Fecha, @Fecha, @Fecha, 1, 0, 0, 0, 0, 0);';
                 SET @Params = N'@AsisteID INT, @PersonaID INT, @Registro NVARCHAR(10), @Hora NCHAR(5), @Fecha DATE';
                 EXEC sp_executesql @SQL, @Params,
-                    @AsisteID=@AsisteID, @PersonaID=@GrpPersonaID,
+                    @AsisteID=@AsisteID, @PersonaID=@InnerPersonaID,
                     @Registro=@GrpRegistroCorto, @Hora=@HoraStr, @Fecha=@GrpFecha;
 
-                FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @FechaEvento;
+                FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @InnerPersonaID, @FechaEvento;
             END;
             CLOSE curMarcajes; DEALLOCATE curMarcajes;
 
@@ -354,13 +355,13 @@ BEGIN
             SET Estatus=2, AsisteID=@AsisteID, ProcesadoEn=SYSDATETIME(), UltimoError=NULL, UltimoCambio=SYSDATETIME()
             WHERE MarcajeDispatchQueueID IN (
                 SELECT MarcajeDispatchQueueID FROM @batch
-                WHERE BaseDatos=@GrpDB AND PersonaID=@GrpPersonaID
+                WHERE BaseDatos=@GrpDB
                   AND CAST(EventoFechaHora AS DATE)=@GrpFecha AND TipoMov=@GrpTipoMov);
 
             UPDATE dbo.AsistenciaMarcaje SET TieneMovimientos=1
             WHERE AsistenciaMarcajeID IN (
                 SELECT AsistenciaMarcajeID FROM @batch
-                WHERE BaseDatos=@GrpDB AND PersonaID=@GrpPersonaID
+                WHERE BaseDatos=@GrpDB
                   AND CAST(EventoFechaHora AS DATE)=@GrpFecha AND TipoMov=@GrpTipoMov);
 
             COMMIT TRANSACTION;
@@ -375,17 +376,17 @@ BEGIN
             SET Estatus=3, UltimoError=LEFT(@ErrMsg,4000), UltimoCambio=SYSDATETIME()
             WHERE MarcajeDispatchQueueID IN (
                 SELECT MarcajeDispatchQueueID FROM @batch
-                WHERE BaseDatos=@GrpDB AND PersonaID=@GrpPersonaID
+                WHERE BaseDatos=@GrpDB
                   AND CAST(EventoFechaHora AS DATE)=@GrpFecha AND TipoMov=@GrpTipoMov);
         END CATCH;
 
-        FETCH NEXT FROM curGrupos INTO @GrpDB, @GrpEmpresaID, @GrpCode, @GrpPersonaID, @GrpFecha, @GrpTipoMov;
+        FETCH NEXT FROM curGrupos INTO @GrpDB, @GrpEmpresaID, @GrpCode, @GrpFecha, @GrpTipoMov;
     END;
 
     CLOSE curGrupos; DEALLOCATE curGrupos;
 END;
 GO
-PRINT '✓ SP dbo.sp_ProcessMarcajeQueue creado/actualizado (modelo 4 movimientos por empleado por día)';
+PRINT '✓ SP dbo.sp_ProcessMarcajeQueue creado/actualizado (modelo 4 movimientos por día, todos los empleados en AsisteD)';
 GO
 
 PRINT '';

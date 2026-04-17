@@ -10,8 +10,8 @@ AS
     Orquestador de despacho de marcajes MB160 → ERPs (misma instancia SQL Server).
     Invocado por los SQL Agent Jobs de corte de asistencia.
 
-    Modelo: 1 Asiste por (empleado, día, TipoMov). Múltiples renglones AsisteD
-    por Asiste (uno por marcaje del checador dentro de esa ventana/día).
+    Modelo: 1 Asiste por (BaseDatos, día, TipoMov). Múltiples renglones AsisteD
+    por Asiste (uno por marcaje del checador, de cualquier empleado, dentro de esa ventana/día).
 
     Clasificación de TipoMov por hora del evento:
       < 12:00:00              → Asiste.Mov = 'Entrada'
@@ -23,8 +23,8 @@ AS
 
     AsisteD.Registro = Asiste.Mov del encabezado.
 
-    Flujo por grupo (BaseDatos, PersonaID, Fecha, TipoMov):
-      INSERT Asiste (1 por grupo) → INSERT AsisteD (N renglones) → spAfectar → validar MovID
+    Flujo por grupo (BaseDatos, Fecha, TipoMov):
+      INSERT Asiste (1 por grupo) → INSERT AsisteD (N renglones, todos los empleados) → spAfectar → validar MovID
 
     Atomicidad: cada grupo se procesa en una transacción explícita.
     Si falla, todos los registros del grupo vuelven a Estatus=3 (reintentable).
@@ -136,24 +136,24 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
     -- -------------------------------------------------------------------------
-    -- 4. Procesar por grupos (BaseDatos, EmpresaID, PersonaID, Fecha, TipoMov)
+    -- 4. Procesar por grupos (BaseDatos, EmpresaID, Fecha, TipoMov)
     --    Un Asiste por grupo + múltiples AsisteD + spAfectar
     --    Cada grupo corre en su propia transacción para atomicidad.
     -- -------------------------------------------------------------------------
     DECLARE
-        -- Cursor externo (grupo)
-        @GrpDB           SYSNAME,
-        @GrpEmpresaID    INT,
-        @GrpCode         NVARCHAR(50),
-        @GrpPersonaID    INT,
-        @GrpFecha        DATE,
-        @GrpTipoMov      NVARCHAR(20),
+        -- Cursor externo (grupo: BaseDatos, Fecha, TipoMov)
+        @GrpDB            SYSNAME,
+        @GrpEmpresaID     INT,
+        @GrpCode          NVARCHAR(50),
+        @GrpFecha         DATE,
+        @GrpTipoMov       NVARCHAR(20),
         @GrpRegistroCorto NVARCHAR(10),  -- valor para AsisteD.Registro (≤10 chars)
-        -- Cursor interno (marcaje individual)
-        @QueueID      BIGINT,
-        @MarcajeID    BIGINT,
-        @FechaEvento  DATETIME2(0),
-        @HoraStr      NCHAR(5),
+        -- Cursor interno (marcaje individual — PersonaID varía por fila)
+        @InnerPersonaID INT,
+        @QueueID        BIGINT,
+        @MarcajeID      BIGINT,
+        @FechaEvento    DATETIME2(0),
+        @HoraStr        NCHAR(5),
         -- Compartidas
         @SQL          NVARCHAR(MAX),
         @Params       NVARCHAR(MAX),
@@ -166,15 +166,14 @@ BEGIN
                BaseDatos,
                EmpresaID,
                CodigoEmpresa,
-               PersonaID,
                CAST(EventoFechaHora AS DATE) AS Fecha,
                TipoMov
         FROM @batch
-        ORDER BY BaseDatos, PersonaID, CAST(EventoFechaHora AS DATE), TipoMov;
+        ORDER BY BaseDatos, CAST(EventoFechaHora AS DATE), TipoMov;
 
     OPEN curGrupos;
     FETCH NEXT FROM curGrupos INTO
-        @GrpDB, @GrpEmpresaID, @GrpCode, @GrpPersonaID, @GrpFecha, @GrpTipoMov;
+        @GrpDB, @GrpEmpresaID, @GrpCode, @GrpFecha, @GrpTipoMov;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
@@ -243,16 +242,15 @@ BEGIN
             --     Renglon  = MAX global + 1 por cada inserción
             -- ------------------------------------------------------------------
             DECLARE curMarcajes CURSOR LOCAL FAST_FORWARD FOR
-                SELECT MarcajeDispatchQueueID, AsistenciaMarcajeID, EventoFechaHora
+                SELECT MarcajeDispatchQueueID, AsistenciaMarcajeID, PersonaID, EventoFechaHora
                 FROM @batch
                 WHERE BaseDatos                    = @GrpDB
-                  AND PersonaID                    = @GrpPersonaID
                   AND CAST(EventoFechaHora AS DATE) = @GrpFecha
                   AND TipoMov                      = @GrpTipoMov
                 ORDER BY EventoFechaHora;
 
             OPEN curMarcajes;
-            FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @FechaEvento;
+            FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @InnerPersonaID, @FechaEvento;
 
             WHILE @@FETCH_STATUS = 0
             BEGIN
@@ -284,12 +282,12 @@ BEGIN
                                 @Hora NCHAR(5), @Fecha DATE';
                 EXEC sp_executesql @SQL, @Params,
                     @AsisteID  = @AsisteID,
-                    @PersonaID = @GrpPersonaID,
+                    @PersonaID = @InnerPersonaID,
                     @Registro  = @GrpRegistroCorto,
                     @Hora      = @HoraStr,
                     @Fecha     = @GrpFecha;
 
-                FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @FechaEvento;
+                FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @InnerPersonaID, @FechaEvento;
             END;
 
             CLOSE curMarcajes; DEALLOCATE curMarcajes;
@@ -334,7 +332,6 @@ BEGIN
             WHERE MarcajeDispatchQueueID IN (
                 SELECT MarcajeDispatchQueueID FROM @batch
                 WHERE BaseDatos                    = @GrpDB
-                  AND PersonaID                    = @GrpPersonaID
                   AND CAST(EventoFechaHora AS DATE) = @GrpFecha
                   AND TipoMov                      = @GrpTipoMov
             );
@@ -344,7 +341,6 @@ BEGIN
             WHERE AsistenciaMarcajeID IN (
                 SELECT AsistenciaMarcajeID FROM @batch
                 WHERE BaseDatos                    = @GrpDB
-                  AND PersonaID                    = @GrpPersonaID
                   AND CAST(EventoFechaHora AS DATE) = @GrpFecha
                   AND TipoMov                      = @GrpTipoMov
             );
@@ -369,14 +365,13 @@ BEGIN
             WHERE MarcajeDispatchQueueID IN (
                 SELECT MarcajeDispatchQueueID FROM @batch
                 WHERE BaseDatos                    = @GrpDB
-                  AND PersonaID                    = @GrpPersonaID
                   AND CAST(EventoFechaHora AS DATE) = @GrpFecha
                   AND TipoMov                      = @GrpTipoMov
             );
         END CATCH;
 
         FETCH NEXT FROM curGrupos INTO
-            @GrpDB, @GrpEmpresaID, @GrpCode, @GrpPersonaID, @GrpFecha, @GrpTipoMov;
+            @GrpDB, @GrpEmpresaID, @GrpCode, @GrpFecha, @GrpTipoMov;
     END;
 
     CLOSE curGrupos;
