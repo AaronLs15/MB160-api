@@ -140,6 +140,7 @@ BEGIN
     DECLARE
         @GrpDB SYSNAME, @GrpEmpresaID INT, @GrpCode NVARCHAR(50),
         @GrpPersonaID INT, @GrpFecha DATE, @GrpTipoMov NVARCHAR(20),
+        @GrpRegistroCorto NVARCHAR(10),
         @QueueID BIGINT, @MarcajeID BIGINT, @FechaEvento DATETIME2(0), @HoraStr NCHAR(5),
         @SQL NVARCHAR(MAX), @Params NVARCHAR(MAX),
         @AsisteID INT, @MovIDPost NVARCHAR(50), @ErrMsg NVARCHAR(4000);
@@ -158,7 +159,16 @@ BEGIN
         BEGIN TRY
             BEGIN TRANSACTION;
 
-            -- INSERT Asiste (1 por grupo)
+            -- Mapear TipoMov → Registro corto (≤10 chars para AsisteD.Registro)
+            -- Asiste.Mov siempre = 'Registro' (único con folio configurado en movtipo)
+            SET @GrpRegistroCorto = CASE @GrpTipoMov
+                WHEN N'Entrada'       THEN N'Entrada'
+                WHEN N'SalidaComida'  THEN N'SalComida'
+                WHEN N'Entradacomida' THEN N'EntComida'
+                WHEN N'Salida'        THEN N'Salida'
+                ELSE @GrpTipoMov END;
+
+            -- INSERT Asiste (1 por grupo, Mov = 'Registro')
             SET @AsisteID = NULL;
             SET @SQL = N'
                 DECLARE @ids TABLE (ID INT);
@@ -168,13 +178,13 @@ BEGIN
                  Sucursal, GenerarPoliza, SincroC, SucursalOrigen,
                  Logico1, Logico2, Logico3, Logico4, Logico5, Logico6, Logico7, Logico8, Logico9)
                 OUTPUT INSERTED.ID INTO @ids
-                VALUES (@EmpresaCode, @TipoMov, @Fecha, @Fecha,
+                VALUES (@EmpresaCode, ''Registro'', @Fecha, @Fecha,
                         ''SINAFECTAR'', ''INTELISIS'', YEAR(@Fecha), MONTH(@Fecha), SYSDATETIME(),
                         1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
                 SELECT @AsisteID = ID FROM @ids;';
-            SET @Params = N'@EmpresaCode NVARCHAR(50), @TipoMov NVARCHAR(20), @Fecha DATE, @AsisteID INT OUTPUT';
+            SET @Params = N'@EmpresaCode NVARCHAR(50), @Fecha DATE, @AsisteID INT OUTPUT';
             EXEC sp_executesql @SQL, @Params,
-                @EmpresaCode=@GrpCode, @TipoMov=@GrpTipoMov, @Fecha=@GrpFecha, @AsisteID=@AsisteID OUTPUT;
+                @EmpresaCode=@GrpCode, @Fecha=@GrpFecha, @AsisteID=@AsisteID OUTPUT;
 
             IF @AsisteID IS NULL RAISERROR(N'OUTPUT INSERTED.ID regresó NULL.', 16, 1);
 
@@ -198,12 +208,12 @@ BEGIN
                     INSERT INTO [' + @GrpDB + N'].dbo.AsisteD
                     (ID, Renglon, Personal, Registro, HoraRegistro, FechaD, FechaA, Fecha, Sucursal,
                      Logico1, Logico2, Logico3, Logico4, Logico5)
-                    VALUES (@AsisteID, @renglon, @PersonaID, @TipoMov, @Hora,
+                    VALUES (@AsisteID, @renglon, @PersonaID, @Registro, @Hora,
                             @Fecha, @Fecha, @Fecha, 1, 0, 0, 0, 0, 0);';
-                SET @Params = N'@AsisteID INT, @PersonaID INT, @TipoMov NVARCHAR(20), @Hora NCHAR(5), @Fecha DATE';
+                SET @Params = N'@AsisteID INT, @PersonaID INT, @Registro NVARCHAR(10), @Hora NCHAR(5), @Fecha DATE';
                 EXEC sp_executesql @SQL, @Params,
                     @AsisteID=@AsisteID, @PersonaID=@GrpPersonaID,
-                    @TipoMov=@GrpTipoMov, @Hora=@HoraStr, @Fecha=@GrpFecha;
+                    @Registro=@GrpRegistroCorto, @Hora=@HoraStr, @Fecha=@GrpFecha;
 
                 FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @FechaEvento;
             END;
