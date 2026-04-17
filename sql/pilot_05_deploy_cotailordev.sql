@@ -118,7 +118,7 @@ BEGIN
         FROM @batch WHERE TipoMov = N'COMIDA_TBD'
     )
     UPDATE b SET b.TipoMov = CASE WHEN c.rn=1 THEN N'SalidaComida'
-                                  WHEN c.rn=2 THEN N'EntradaComida'
+                                  WHEN c.rn=2 THEN N'Entradacomida'
                                   ELSE             N'DESCARTAR' END
     FROM @batch b INNER JOIN comida c ON c.MarcajeDispatchQueueID = b.MarcajeDispatchQueueID;
 
