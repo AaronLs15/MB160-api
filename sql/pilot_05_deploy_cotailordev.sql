@@ -168,7 +168,7 @@ BEGIN
                 WHEN N'Salida'        THEN N'Salida'
                 ELSE @GrpTipoMov END;
 
-            -- INSERT Asiste (1 por grupo, Mov = 'Registro')
+            -- INSERT Asiste (1 por grupo, Mov = TipoMov)
             SET @AsisteID = NULL;
             SET @SQL = N'
                 DECLARE @ids TABLE (ID INT);
@@ -178,13 +178,13 @@ BEGIN
                  Sucursal, GenerarPoliza, SincroC, SucursalOrigen,
                  Logico1, Logico2, Logico3, Logico4, Logico5, Logico6, Logico7, Logico8, Logico9)
                 OUTPUT INSERTED.ID INTO @ids
-                VALUES (@EmpresaCode, ''Registro'', @Fecha, @Fecha,
+                VALUES (@EmpresaCode, @TipoMov, @Fecha, @Fecha,
                         ''SINAFECTAR'', ''INTELISIS'', YEAR(@Fecha), MONTH(@Fecha), SYSDATETIME(),
                         1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
                 SELECT @AsisteID = ID FROM @ids;';
-            SET @Params = N'@EmpresaCode NVARCHAR(50), @Fecha DATE, @AsisteID INT OUTPUT';
+            SET @Params = N'@EmpresaCode NVARCHAR(50), @TipoMov NVARCHAR(20), @Fecha DATE, @AsisteID INT OUTPUT';
             EXEC sp_executesql @SQL, @Params,
-                @EmpresaCode=@GrpCode, @Fecha=@GrpFecha, @AsisteID=@AsisteID OUTPUT;
+                @EmpresaCode=@GrpCode, @TipoMov=@GrpTipoMov, @Fecha=@GrpFecha, @AsisteID=@AsisteID OUTPUT;
 
             IF @AsisteID IS NULL RAISERROR(N'OUTPUT INSERTED.ID regresó NULL.', 16, 1);
 
