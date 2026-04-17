@@ -37,7 +37,7 @@ en `AsisteD` (un renglón por marcaje del checador dentro de esa ventana).
 ```
 Asiste (Mov='Entrada')       → AsisteD: todos los marcajes < 12:00
 Asiste (Mov='SalidaComida')  → AsisteD: 1er marcaje en 12:50–15:59
-Asiste (Mov='EntradaComida') → AsisteD: 2do marcaje en 12:50–15:59
+Asiste (Mov='Entradacomida') → AsisteD: 2do marcaje en 12:50–15:59
 Asiste (Mov='Salida')        → AsisteD: todos los marcajes >= 16:00
 ```
 
@@ -50,7 +50,7 @@ Asiste (Mov='Salida')        → AsisteD: todos los marcajes >= 16:00
 | `< 12:00:00`          | `'Entrada'`                       | —                            | `0`                  |
 | `12:00:00 – 12:49:59` | Descartado (Estatus=4)            | Zona gris, sin categoría     | —                    |
 | `12:50:00 – 15:59:59` | `'SalidaComida'`                  | 1er marcaje del empleado+día | `4`                  |
-| `12:50:00 – 15:59:59` | `'EntradaComida'`                 | 2do marcaje del empleado+día | `4`                  |
+| `12:50:00 – 15:59:59` | `'Entradacomida'`                 | 2do marcaje del empleado+día | `4`                  |
 | `12:50:00 – 15:59:59` | Descartado (Estatus=4)            | 3er+ marcaje → excedente     | —                    |
 | `>= 16:00:00`         | `'Salida'`                        | —                            | `1`                  |
 
