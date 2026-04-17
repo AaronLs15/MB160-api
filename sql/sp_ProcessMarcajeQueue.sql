@@ -142,12 +142,13 @@ BEGIN
     -- -------------------------------------------------------------------------
     DECLARE
         -- Cursor externo (grupo)
-        @GrpDB        SYSNAME,
-        @GrpEmpresaID INT,
-        @GrpCode      NVARCHAR(50),
-        @GrpPersonaID INT,
-        @GrpFecha     DATE,
-        @GrpTipoMov   NVARCHAR(20),
+        @GrpDB           SYSNAME,
+        @GrpEmpresaID    INT,
+        @GrpCode         NVARCHAR(50),
+        @GrpPersonaID    INT,
+        @GrpFecha        DATE,
+        @GrpTipoMov      NVARCHAR(20),
+        @GrpRegistroCorto NVARCHAR(10),  -- valor para AsisteD.Registro (≤10 chars)
         -- Cursor interno (marcaje individual)
         @QueueID      BIGINT,
         @MarcajeID    BIGINT,
@@ -180,9 +181,20 @@ BEGIN
         BEGIN TRY
             BEGIN TRANSACTION;
 
+            -- Mapear TipoMov → valor corto para AsisteD.Registro (columna ≤10 chars)
+            -- Asiste.Mov siempre = 'Registro' (único Mov ASIS con consecutivo configurado)
+            SET @GrpRegistroCorto = CASE @GrpTipoMov
+                WHEN N'Entrada'       THEN N'Entrada'
+                WHEN N'SalidaComida'  THEN N'SalComida'
+                WHEN N'Entradacomida' THEN N'EntComida'
+                WHEN N'Salida'        THEN N'Salida'
+                ELSE @GrpTipoMov
+            END;
+
             -- ------------------------------------------------------------------
             -- 4a. INSERT en Asiste (1 por grupo)
-            --     Mov = TipoMov del grupo | MovID lo genera spAfectar
+            --     Mov = 'Registro' siempre (único con folio configurado en movtipo)
+            --     MovID lo genera spAfectar
             -- ------------------------------------------------------------------
             SET @AsisteID = NULL;
             SET @SQL = N'
@@ -203,7 +215,7 @@ BEGIN
                 OUTPUT INSERTED.ID INTO @ids
                 VALUES
                 (
-                    @EmpresaCode, @TipoMov,
+                    @EmpresaCode, ''Registro'',
                     @Fecha, @Fecha,
                     ''SINAFECTAR'', ''INTELISIS'',
                     YEAR(@Fecha), MONTH(@Fecha),
@@ -216,10 +228,9 @@ BEGIN
 
                 SELECT @AsisteID = ID FROM @ids;';
 
-            SET @Params = N'@EmpresaCode NVARCHAR(50), @TipoMov NVARCHAR(20), @Fecha DATE, @AsisteID INT OUTPUT';
+            SET @Params = N'@EmpresaCode NVARCHAR(50), @Fecha DATE, @AsisteID INT OUTPUT';
             EXEC sp_executesql @SQL, @Params,
                 @EmpresaCode = @GrpCode,
-                @TipoMov     = @GrpTipoMov,
                 @Fecha       = @GrpFecha,
                 @AsisteID    = @AsisteID OUTPUT;
 
@@ -228,7 +239,7 @@ BEGIN
 
             -- ------------------------------------------------------------------
             -- 4b. INSERT en AsisteD (un renglón por cada marcaje del grupo)
-            --     Registro = TipoMov del grupo (hereda el Mov del encabezado)
+            --     Registro = @GrpRegistroCorto (≤10 chars, identifica el tipo)
             --     Renglon  = MAX global + 1 por cada inserción
             -- ------------------------------------------------------------------
             DECLARE curMarcajes CURSOR LOCAL FAST_FORWARD FOR
@@ -263,18 +274,18 @@ BEGIN
                     VALUES
                     (
                         @AsisteID, @renglon,
-                        @PersonaID, @TipoMov, @Hora,
+                        @PersonaID, @Registro, @Hora,
                         @Fecha, @Fecha, @Fecha,
                         1,
                         0, 0, 0, 0, 0
                     );';
 
-                SET @Params = N'@AsisteID INT, @PersonaID INT, @TipoMov NVARCHAR(20),
+                SET @Params = N'@AsisteID INT, @PersonaID INT, @Registro NVARCHAR(10),
                                 @Hora NCHAR(5), @Fecha DATE';
                 EXEC sp_executesql @SQL, @Params,
                     @AsisteID  = @AsisteID,
                     @PersonaID = @GrpPersonaID,
-                    @TipoMov   = @GrpTipoMov,
+                    @Registro  = @GrpRegistroCorto,
                     @Hora      = @HoraStr,
                     @Fecha     = @GrpFecha;
 
