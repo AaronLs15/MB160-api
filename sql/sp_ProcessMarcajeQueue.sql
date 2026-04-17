@@ -193,8 +193,7 @@ BEGIN
 
             -- ------------------------------------------------------------------
             -- 4a. INSERT en Asiste (1 por grupo)
-            --     Mov = 'Registro' siempre (único con folio configurado en movtipo)
-            --     MovID lo genera spAfectar
+            --     Mov = TipoMov del grupo | MovID lo genera spAfectar
             -- ------------------------------------------------------------------
             SET @AsisteID = NULL;
             SET @SQL = N'
@@ -215,7 +214,7 @@ BEGIN
                 OUTPUT INSERTED.ID INTO @ids
                 VALUES
                 (
-                    @EmpresaCode, ''Registro'',
+                    @EmpresaCode, @TipoMov,
                     @Fecha, @Fecha,
                     ''SINAFECTAR'', ''INTELISIS'',
                     YEAR(@Fecha), MONTH(@Fecha),
@@ -228,9 +227,10 @@ BEGIN
 
                 SELECT @AsisteID = ID FROM @ids;';
 
-            SET @Params = N'@EmpresaCode NVARCHAR(50), @Fecha DATE, @AsisteID INT OUTPUT';
+            SET @Params = N'@EmpresaCode NVARCHAR(50), @TipoMov NVARCHAR(20), @Fecha DATE, @AsisteID INT OUTPUT';
             EXEC sp_executesql @SQL, @Params,
                 @EmpresaCode = @GrpCode,
+                @TipoMov     = @GrpTipoMov,
                 @Fecha       = @GrpFecha,
                 @AsisteID    = @AsisteID OUTPUT;
 
