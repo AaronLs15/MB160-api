@@ -90,6 +90,7 @@ def poll_once(
     engine,
     *,
     min_ts: Optional[datetime] = None,
+    max_ts: Optional[datetime] = None,
     use_last_ts: bool = True,
     device_ip: Optional[str] = None,
     device_port: Optional[int] = None,
@@ -136,6 +137,8 @@ def poll_once(
 
                 if min_ts is not None and ts < min_ts:
                     continue
+                if max_ts is not None and ts >= max_ts:
+                    continue
                 # incremental
                 if last_ts is not None and ts <= last_ts:
                     continue
@@ -163,15 +166,15 @@ def poll_once(
                 except IntegrityError:
                     dup_skipped += 1
 
-            if min_ts is None:
+            if min_ts is None and max_ts is None:
                 log.info(
                     "Poll OK | device=%s | ip=%s | logs=%d | inserted=%d | dup_skipped=%d | last_ts=%s",
                     device_serial, target_ip, len(logs), inserted, dup_skipped, last_ts
                 )
             else:
                 log.info(
-                    "Poll OK | device=%s | ip=%s | logs=%d | inserted=%d | dup_skipped=%d | min_ts=%s",
-                    device_serial, target_ip, len(logs), inserted, dup_skipped, min_ts
+                    "Poll OK | device=%s | ip=%s | logs=%d | inserted=%d | dup_skipped=%d | min_ts=%s | max_ts=%s",
+                    device_serial, target_ip, len(logs), inserted, dup_skipped, min_ts, max_ts
                 )
 
     finally:
