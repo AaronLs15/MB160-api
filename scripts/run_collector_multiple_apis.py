@@ -18,6 +18,11 @@ from mb160_service.config import get_device_settings
 from mb160_service.db import build_engine
 from mb160_service.logging import setup_logging
 
+try:
+    from zk.exception import ZKNetworkError, ZKErrorResponse  # type: ignore
+except Exception:  # pragma: no cover
+    ZKNetworkError = ZKErrorResponse = ()  # type: ignore
+
 log = logging.getLogger("mb160.collector.multi")
 
 
@@ -68,17 +73,34 @@ def main() -> int:
         cycle_start = time.monotonic()
         log.info("Iniciando ciclo de pull para %d dispositivos", len(device_ips))
 
+        unreachable = 0
+        errors = 0
+
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="mb160") as executor:
-            futures = [executor.submit(_poll_device, engine, ip, settings.port) for ip in device_ips]
-            for future in as_completed(futures):
+            future_to_ip = {
+                executor.submit(_poll_device, engine, ip, settings.port): ip
+                for ip in device_ips
+            }
+            for future in as_completed(future_to_ip):
+                ip = future_to_ip[future]
                 try:
                     future.result()
+                except ZKNetworkError:
+                    unreachable += 1
+                    log.warning("Device offline | ip=%s", ip)
+                except ZKErrorResponse as e:
+                    errors += 1
+                    log.error("Device error | ip=%s | %s", ip, e)
                 except Exception as e:
-                    log.exception("Error en pull de un dispositivo: %s", e)
+                    errors += 1
+                    log.error("Pull failed | ip=%s | %s: %s", ip, type(e).__name__, e)
 
         elapsed = time.monotonic() - cycle_start
         sleep_seconds = max(1, interval_seconds - int(elapsed))
-        log.info("Ciclo completado | elapsed=%.1fs | next_in=%ss", elapsed, sleep_seconds)
+        log.info(
+            "Ciclo completado | elapsed=%.1fs | offline=%d | errors=%d | next_in=%ss",
+            elapsed, unreachable, errors, sleep_seconds,
+        )
         time.sleep(sleep_seconds)
 
 

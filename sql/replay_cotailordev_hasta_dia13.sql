@@ -1,43 +1,48 @@
+/*
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  REPLAY COTAILORDEV — Días hasta 2026-05-13                                  ║
+║                                                                              ║
+║  Cambios:                                                                    ║
+║   • SP redespliegue: errores ya NO cancelan el Asiste, queda como borrador  ║
+║     con el error en Asiste.Observaciones.                                    ║
+║   • Validación nueva: máx 1 Asiste activo por (BaseDatos, Mov, Fecha).      ║
+║                                                                              ║
+║  Plan:                                                                       ║
+║   Sección A — Redesplegar sp_ProcessMarcajeQueue                            ║
+║   Sección B — Limpiar Asistes CANCELADO en cotailordev (hasta 2026-05-13)   ║
+║   Sección C — Resetear cola (Estatus=3 → 0) para reproceso                  ║
+║   Sección D — Ejecutar sp_ProcessMarcajeQueue                                ║
+║   Sección E — Verificar resultado                                            ║
+║                                                                              ║
+║  ⚠ Verificar que EmpresaConfig.BaseDatos para EmpresaID=5 = N'cotailordev'  ║
+║    antes de ejecutar Sección D.                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+*/
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- SECCIÓN A — REDESPLEGAR sp_ProcessMarcajeQueue en Checador
+-- ═════════════════════════════════════════════════════════════════════════════
+
+USE Checador;
+GO
+
 CREATE OR ALTER PROCEDURE dbo.sp_ProcessMarcajeQueue
-    @TipoCorte TINYINT = NULL,   -- Ventana horaria a procesar:
-                                  --   0 = Entrada        (< 12:00)
-                                  --   4 = Comida         (12:50 – 15:59) → genera SalidaComida y EntradaComida
-                                  --   1 = Salida         (>= 16:00)
-                                  -- NULL = todas las ventanas (corte semanal)
+    @TipoCorte TINYINT = NULL,
     @BatchSize INT     = 200
 AS
 /*
-    Orquestador de despacho de marcajes MB160 → ERPs (misma instancia SQL Server).
-    Invocado por los SQL Agent Jobs de corte de asistencia.
+    Orquestador MB160 → ERP. Modelo: 1 Asiste por (BaseDatos, Fecha, TipoMov).
 
-    Modelo: 1 Asiste por (BaseDatos, día, TipoMov). Múltiples renglones AsisteD
-    por Asiste (uno por marcaje del checador, de cualquier empleado, dentro de esa ventana/día).
+    Cambios v2:
+      - Validación duplicado: aborta el grupo si ya existe Asiste activo del mismo tipo/día.
+      - Errores post-spAfectar (sin MovID o excepción): NO cancela el Asiste.
+        Queda como borrador (SINAFECTAR) con el error en Asiste.Observaciones.
 
-    Clasificación de TipoMov por hora del evento:
-      < 12:00:00              → Asiste.Mov = 'Entrada'
-      12:00:00 – 12:49:59     → Descartado (zona gris, Estatus=4)
-      12:50:00 – 15:59:59     → 1er marcaje del empleado en el día → 'SalidaComida'
-                                 2do marcaje → 'EntradaComida'
-                                 3er+ → Descartado (Estatus=4)
-      >= 16:00:00             → Asiste.Mov = 'Salida'
-
-    AsisteD.Registro = Asiste.Mov del encabezado.
-
-    Flujo por grupo (BaseDatos, Fecha, TipoMov):
-      INSERT Asiste (1 por grupo) → INSERT AsisteD (N renglones, todos los empleados) → spAfectar → validar MovID
-
-    Atomicidad: cada grupo se procesa en una transacción explícita.
-    Si falla, todos los registros del grupo vuelven a Estatus=3 (reintentable).
-
-    Estatus: 0=Pendiente 1=Procesando 2=Hecho 3=Error(reintentable) 4=Descartado
+    Estatus cola: 0=Pendiente 1=Procesando 2=Hecho 3=Error(reintentable) 4=Descartado
 */
 BEGIN
     SET NOCOUNT ON;
 
-    -- -------------------------------------------------------------------------
-    -- 1. Tomar batch y marcarlo como Procesando
-    --    Filtro por ventana horaria según @TipoCorte
-    -- -------------------------------------------------------------------------
     DECLARE @batch TABLE
     (
         MarcajeDispatchQueueID BIGINT,
@@ -48,9 +53,10 @@ BEGIN
         PersonaID              INT,
         Punch                  TINYINT,
         EventoFechaHora        DATETIME2(0),
-        TipoMov                NVARCHAR(20)    -- asignado en paso 2
+        TipoMov                NVARCHAR(20)
     );
 
+    -- 1. Tomar batch + marcar Procesando
     ;WITH cte AS (
         SELECT TOP (@BatchSize) q.MarcajeDispatchQueueID
         FROM dbo.MarcajeDispatchQueue q
@@ -76,7 +82,7 @@ BEGIN
         inserted.PersonaID,
         inserted.Punch,
         inserted.EventoFechaHora,
-        NULL    -- TipoMov: se asigna en paso 2
+        NULL
     INTO @batch
     FROM dbo.MarcajeDispatchQueue q
     INNER JOIN cte ON cte.MarcajeDispatchQueueID = q.MarcajeDispatchQueueID
@@ -84,25 +90,16 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
-    -- -------------------------------------------------------------------------
-    -- 1b. DEDUPE doble-tap del checador.
-    --     Si existe marcaje previo del mismo UsuarioDispositivo en el mismo día
-    --     con diferencia ≤ 60 segundos, este se descarta (Estatus=4).
-    --     Compara contra dbo.AsistenciaMarcaje (no solo @batch) para detectar
-    --     duplicados aunque el anterior ya esté procesado/descartado.
-    -- -------------------------------------------------------------------------
+    -- 1b. DEDUPE doble-tap (≤60s mismo empleado/día)
     UPDATE dbo.MarcajeDispatchQueue
     SET Estatus      = 4,
         UltimoError  = N'Marcaje duplicado (≤60s del anterior del mismo empleado en el día). Doble-tap del checador.',
         UltimoCambio = SYSDATETIME()
     FROM dbo.MarcajeDispatchQueue mdq
-    INNER JOIN @batch b
-        ON b.MarcajeDispatchQueueID = mdq.MarcajeDispatchQueueID
-    INNER JOIN dbo.AsistenciaMarcaje am
-        ON am.AsistenciaMarcajeID = b.AsistenciaMarcajeID
+    INNER JOIN @batch b ON b.MarcajeDispatchQueueID = mdq.MarcajeDispatchQueueID
+    INNER JOIN dbo.AsistenciaMarcaje am ON am.AsistenciaMarcajeID = b.AsistenciaMarcajeID
     WHERE EXISTS (
-        SELECT 1
-        FROM dbo.AsistenciaMarcaje prev
+        SELECT 1 FROM dbo.AsistenciaMarcaje prev
         WHERE prev.UsuarioDispositivo = am.UsuarioDispositivo
           AND prev.EventoFechaHora    < am.EventoFechaHora
           AND CAST(prev.EventoFechaHora AS DATE) = CAST(am.EventoFechaHora AS DATE)
@@ -111,11 +108,9 @@ BEGIN
 
     DELETE b
     FROM @batch b
-    INNER JOIN dbo.AsistenciaMarcaje am
-        ON am.AsistenciaMarcajeID = b.AsistenciaMarcajeID
+    INNER JOIN dbo.AsistenciaMarcaje am ON am.AsistenciaMarcajeID = b.AsistenciaMarcajeID
     WHERE EXISTS (
-        SELECT 1
-        FROM dbo.AsistenciaMarcaje prev
+        SELECT 1 FROM dbo.AsistenciaMarcaje prev
         WHERE prev.UsuarioDispositivo = am.UsuarioDispositivo
           AND prev.EventoFechaHora    < am.EventoFechaHora
           AND CAST(prev.EventoFechaHora AS DATE) = CAST(am.EventoFechaHora AS DATE)
@@ -124,10 +119,7 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
-    -- -------------------------------------------------------------------------
-    -- 2. Clasificar TipoMov en @batch
-    --    2a. Clasificación base por ventana horaria
-    -- -------------------------------------------------------------------------
+    -- 2. Clasificar TipoMov
     UPDATE @batch
     SET TipoMov =
         CASE
@@ -137,8 +129,6 @@ BEGIN
             ELSE                                                  N'Salida'
         END;
 
-    -- 2b. Split ventana comida: ROW_NUMBER por (DB, empleado, día) ordenado por hora.
-    --     1er registro → 'SalidaComida' | 2do → 'EntradaComida' | 3ro+ → 'DESCARTAR'
     ;WITH comida AS (
         SELECT MarcajeDispatchQueueID,
                ROW_NUMBER() OVER (
@@ -157,14 +147,12 @@ BEGIN
     FROM @batch b
     INNER JOIN comida c ON c.MarcajeDispatchQueueID = b.MarcajeDispatchQueueID;
 
-    -- -------------------------------------------------------------------------
-    -- 3. Descartar zona gris (12:00–12:49) y excedente comida (3ro en adelante)
-    -- -------------------------------------------------------------------------
+    -- 3. Descartar zona gris y excedente comida
     UPDATE dbo.MarcajeDispatchQueue
     SET Estatus      = 4,
         UltimoError  = CASE b.TipoMov
-            WHEN N'ZONAGRIS'  THEN N'Marcaje en zona sin categoría (12:00–12:49). No corresponde a ningún corte.'
-            WHEN N'DESCARTAR' THEN N'Más de 2 registros en ventana comida (12:50–15:59) para este empleado en el día. Tercero en adelante descartado.'
+            WHEN N'ZONAGRIS'  THEN N'Marcaje en zona sin categoría (12:00–12:49).'
+            WHEN N'DESCARTAR' THEN N'Más de 2 registros en ventana comida (12:50–15:59) para este empleado en el día.'
         END,
         UltimoCambio = SYSDATETIME()
     FROM dbo.MarcajeDispatchQueue mdq
@@ -172,12 +160,9 @@ BEGIN
     WHERE b.TipoMov IN (N'ZONAGRIS', N'DESCARTAR');
 
     DELETE FROM @batch WHERE TipoMov IN (N'ZONAGRIS', N'DESCARTAR');
-
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
-    -- -------------------------------------------------------------------------
-    -- 3b. Descartar empleados no registrados en Intelisis (no están en PersonalAutorizado)
-    -- -------------------------------------------------------------------------
+    -- 3b. Descartar empleados no autorizados
     UPDATE dbo.MarcajeDispatchQueue
     SET Estatus      = 4,
         UltimoError  = N'PersonaID no registrado en Intelisis (no existe en PersonalAutorizado).',
@@ -200,49 +185,37 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM @batch) RETURN;
 
-    -- -------------------------------------------------------------------------
-    -- 4. Procesar por grupos (BaseDatos, EmpresaID, Fecha, TipoMov)
-    --    Un Asiste por grupo + múltiples AsisteD + spAfectar
-    --    Cada grupo corre en su propia transacción para atomicidad.
-    -- -------------------------------------------------------------------------
+    -- 4. Procesar por grupo
     DECLARE
-        -- Cursor externo (grupo: BaseDatos, Fecha, TipoMov)
         @GrpDB            SYSNAME,
         @GrpEmpresaID     INT,
         @GrpCode          NVARCHAR(50),
         @GrpFecha         DATE,
         @GrpTipoMov       NVARCHAR(20),
-        @GrpRegistroCorto NVARCHAR(10),  -- valor para AsisteD.Registro (≤10 chars)
-        -- Cursor interno (marcaje individual — PersonaID varía por fila)
-        @InnerPersonaID INT,
-        @QueueID        BIGINT,
-        @MarcajeID      BIGINT,
-        @FechaEvento    DATETIME2(0),
-        @HoraStr        NCHAR(5),
-        -- Compartidas
+        @GrpRegistroCorto NVARCHAR(10),
+        @InnerPersonaID   INT,
+        @QueueID          BIGINT,
+        @MarcajeID        BIGINT,
+        @FechaEvento      DATETIME2(0),
+        @HoraStr          NCHAR(5),
         @SQL              NVARCHAR(MAX),
         @Params           NVARCHAR(MAX),
         @AsisteID         INT,
-        @ExistingAsisteID INT,   -- ID del Asiste previo del grupo (si existe), para cancelar antes de re-crear
-        @CancelOK         BIT,   -- 0 = Fase 0 (cancel previo) falló; salta Fases 1 y 2
-        @InsertOK         BIT,   -- 1 = Fase 1 (INSERTs) completada; habilita Fase 2 (spAfectar)
+        @ExistingAsisteID INT,
+        @CancelOK         BIT,
+        @InsertOK         BIT,
         @MovIDPost        NVARCHAR(50),
         @ErrMsg           NVARCHAR(4000),
-        @ActiveCount      INT,            -- validación: # de Asistes activos para el grupo
-        @FechaStr         NVARCHAR(10);   -- @GrpFecha formateado para RAISERROR
+        @ActiveCount      INT,
+        @FechaStr         NVARCHAR(10);
 
-    -- Orden de procesamiento crítico:
-    --   1. Entrada → 2. SalidaComida → 3. Entradacomida → 4. Salida
-    -- spAfectar valida que un empleado con Salida ya afectada no puede tener
-    -- SalidaComida posterior. Si procesamos Salida antes que SalidaComida,
-    -- spAfectar rechaza la SalidaComida.
+    -- Orden crítico: Entrada → SalidaComida → Entradacomida → Salida
+    -- spAfectar rechaza SalidaComida si Salida del mismo empleado ya afectada.
     DECLARE curGrupos CURSOR LOCAL FAST_FORWARD FOR
         SELECT BaseDatos, EmpresaID, CodigoEmpresa, Fecha, TipoMov
         FROM (
             SELECT DISTINCT
-                   BaseDatos,
-                   EmpresaID,
-                   CodigoEmpresa,
+                   BaseDatos, EmpresaID, CodigoEmpresa,
                    CAST(EventoFechaHora AS DATE) AS Fecha,
                    TipoMov
             FROM @batch
@@ -266,8 +239,7 @@ BEGIN
         SET @CancelOK = 1;
         SET @InsertOK = 0;
 
-        -- Mapear TipoMov → valor corto para AsisteD.Registro (columna ≤10 chars)
-        -- AsisteD.Registro mapping:
+        -- AsisteD.Registro:
         --   Asiste.Mov = 'Entradacomida' → AsisteD.Registro = 'Entrada'
         --   Asiste.Mov = 'SalidaComida'  → AsisteD.Registro = 'Salida'
         SET @GrpRegistroCorto = CASE @GrpTipoMov
@@ -279,11 +251,7 @@ BEGIN
         END;
 
         -- ==================================================================
-        -- FASE 0: Detectar y cancelar Asiste previo — FUERA de transacción.
-        --         spAfectar no funciona con @@TRANCOUNT > 0 (ni para CANCELAR
-        --         ni para AFECTAR). Todas las llamadas a spAfectar deben
-        --         ejecutarse sin transacción activa.
-        --         Nota: el Estatus real en Intelisis es 'CANCELADO' (no 'CANCELAR').
+        -- FASE 0: Cancelar Asiste previo (fuera de transacción)
         -- ==================================================================
         BEGIN TRY
             SET @ExistingAsisteID = NULL;
@@ -297,10 +265,10 @@ BEGIN
                   AND Estatus         NOT IN (''CANCELADO'', ''CANCELAR'');';
             SET @Params = N'@EmpresaCode NVARCHAR(50), @TipoMov NVARCHAR(20), @Fecha DATE, @ExistingAsisteID INT OUTPUT';
             EXEC sp_executesql @SQL, @Params,
-                @EmpresaCode        = @GrpCode,
-                @TipoMov            = @GrpTipoMov,
-                @Fecha              = @GrpFecha,
-                @ExistingAsisteID   = @ExistingAsisteID OUTPUT;
+                @EmpresaCode      = @GrpCode,
+                @TipoMov          = @GrpTipoMov,
+                @Fecha            = @GrpFecha,
+                @ExistingAsisteID = @ExistingAsisteID OUTPUT;
 
             IF @ExistingAsisteID IS NOT NULL
             BEGIN
@@ -328,19 +296,14 @@ BEGIN
         END CATCH;
 
         -- ==================================================================
-        -- FASE 1: Inserts en Asiste + AsisteD (transaccional).
-        --         Solo corre si Fase 0 no tuvo error (@CancelOK = 1).
+        -- FASE 1: Inserts (transaccional) — incluye validación duplicado
         -- ==================================================================
         IF @CancelOK = 1
-        BEGIN  -- abre IF @CancelOK
+        BEGIN
         BEGIN TRY
             BEGIN TRANSACTION;
 
-            -- ------------------------------------------------------------------
             -- 4.0 VALIDACIÓN: máximo 1 Asiste activo por (BaseDatos, Empresa, Mov, Fecha)
-            --     Si Fase 0 funcionó, este conteo debe ser 0. Si > 0 → aborta para
-            --     no duplicar movimientos del mismo tipo en el mismo día.
-            -- ------------------------------------------------------------------
             SET @ActiveCount = 0;
             SET @SQL = N'
                 SELECT @ActiveCount = COUNT(*)
@@ -361,46 +324,25 @@ BEGIN
             BEGIN
                 SET @FechaStr = CONVERT(NVARCHAR(10), @GrpFecha, 23);
                 RAISERROR(
-                    N'Validación duplicado: ya existe %d Asiste(s) activo(s) para DB=%s, Mov=%s, Fecha=%s. Solo se permite 1 por tipo/base/día.',
+                    N'Validación duplicado: ya existe %d Asiste(s) activo(s) para DB=%s, Mov=%s, Fecha=%s.',
                     16, 1, @ActiveCount, @GrpDB, @GrpTipoMov, @FechaStr);
             END;
 
-            -- ------------------------------------------------------------------
-            -- 4a. INSERT en Asiste (1 por grupo)
-            --     Mov = TipoMov del grupo | MovID lo genera spAfectar en Fase 2
-            -- ------------------------------------------------------------------
+            -- 4a. INSERT Asiste
             SET @AsisteID = NULL;
             SET @SQL = N'
                 DECLARE @ids TABLE (ID INT);
-
                 INSERT INTO [' + @GrpDB + N'].dbo.Asiste
-                (
-                    Empresa, Mov,
-                    FechaEmision, FechaAplicacion,
-                    Estatus, Usuario,
-                    Ejercicio, Periodo,
-                    FechaRegistro,
-                    Sucursal, GenerarPoliza,
-                    SincroC, SucursalOrigen,
-                    Logico1, Logico2, Logico3, Logico4, Logico5,
-                    Logico6, Logico7, Logico8, Logico9
-                )
+                (Empresa, Mov, FechaEmision, FechaAplicacion,
+                 Estatus, Usuario, Ejercicio, Periodo, FechaRegistro,
+                 Sucursal, GenerarPoliza, SincroC, SucursalOrigen,
+                 Logico1, Logico2, Logico3, Logico4, Logico5,
+                 Logico6, Logico7, Logico8, Logico9)
                 OUTPUT INSERTED.ID INTO @ids
-                VALUES
-                (
-                    @EmpresaCode, @TipoMov,
-                    @Fecha, @Fecha,
-                    ''SINAFECTAR'', ''INTELISIS'',
-                    YEAR(@Fecha), MONTH(@Fecha),
-                    SYSDATETIME(),
-                    1, 0,
-                    1, 1,
-                    0, 0, 0, 0, 0,
-                    0, 0, 0, 0
-                );
-
+                VALUES (@EmpresaCode, @TipoMov, @Fecha, @Fecha,
+                        ''SINAFECTAR'', ''INTELISIS'', YEAR(@Fecha), MONTH(@Fecha), SYSDATETIME(),
+                        1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
                 SELECT @AsisteID = ID FROM @ids;';
-
             SET @Params = N'@EmpresaCode NVARCHAR(50), @TipoMov NVARCHAR(20), @Fecha DATE, @AsisteID INT OUTPUT';
             EXEC sp_executesql @SQL, @Params,
                 @EmpresaCode = @GrpCode,
@@ -409,16 +351,10 @@ BEGIN
                 @AsisteID    = @AsisteID OUTPUT;
 
             IF @AsisteID IS NULL
-                RAISERROR(N'OUTPUT INSERTED.ID regresó NULL — revisar si Asiste.ID es generado correctamente.', 16, 1);
+                RAISERROR(N'OUTPUT INSERTED.ID regresó NULL.', 16, 1);
 
-            -- ------------------------------------------------------------------
-            -- 4b. INSERT en AsisteD (un renglón por cada marcaje del grupo)
-            --     Registro = @GrpRegistroCorto (≤10 chars, identifica el tipo)
-            --     Renglon  = MAX global + 1 por cada inserción (UPDLOCK+HOLDLOCK
-            --                evita colisiones bajo concurrencia).
-            -- ------------------------------------------------------------------
+            -- 4b. INSERT AsisteD
             DECLARE curMarcajes CURSOR LOCAL FAST_FORWARD FOR
-                -- Marcajes del batch actual para este grupo
                 SELECT MarcajeDispatchQueueID, AsistenciaMarcajeID, PersonaID, EventoFechaHora
                 FROM @batch
                 WHERE BaseDatos                    = @GrpDB
@@ -427,9 +363,6 @@ BEGIN
 
                 UNION ALL
 
-                -- Marcajes ya procesados que pertenecían al Asiste cancelado.
-                -- Cuando @ExistingAsisteID IS NULL → (AsisteID = NULL) es siempre FALSE
-                -- en SQL → cero filas, sin efecto sobre el caso normal.
                 SELECT q.MarcajeDispatchQueueID, q.AsistenciaMarcajeID, q.PersonaID, q.EventoFechaHora
                 FROM dbo.MarcajeDispatchQueue q
                 WHERE q.BaseDatos                    = @GrpDB
@@ -445,27 +378,16 @@ BEGIN
             WHILE @@FETCH_STATUS = 0
             BEGIN
                 SET @HoraStr = CONVERT(NCHAR(5), CAST(@FechaEvento AS TIME), 108);
-
                 SET @SQL = N'
                     INSERT INTO [' + @GrpDB + N'].dbo.AsisteD
-                    (
-                        ID, Renglon,
-                        Personal, Registro, HoraRegistro,
-                        FechaD, FechaA, Fecha,
-                        Sucursal,
-                        Logico1, Logico2, Logico3, Logico4, Logico5
-                    )
-                    SELECT
-                        @AsisteID,
-                        ISNULL(MAX(Renglon), 0) + 1,
-                        @PersonaID, @Registro, @Hora,
-                        @Fecha, @Fecha, @Fecha,
-                        1,
-                        0, 0, 0, 0, 0
+                    (ID, Renglon, Personal, Registro, HoraRegistro,
+                     FechaD, FechaA, Fecha, Sucursal,
+                     Logico1, Logico2, Logico3, Logico4, Logico5)
+                    SELECT @AsisteID, ISNULL(MAX(Renglon), 0) + 1,
+                           @PersonaID, @Registro, @Hora,
+                           @Fecha, @Fecha, @Fecha, 1, 0, 0, 0, 0, 0
                     FROM [' + @GrpDB + N'].dbo.AsisteD WITH (UPDLOCK, HOLDLOCK);';
-
-                SET @Params = N'@AsisteID INT, @PersonaID INT, @Registro NVARCHAR(10),
-                                @Hora NCHAR(5), @Fecha DATE';
+                SET @Params = N'@AsisteID INT, @PersonaID INT, @Registro NVARCHAR(10), @Hora NCHAR(5), @Fecha DATE';
                 EXEC sp_executesql @SQL, @Params,
                     @AsisteID  = @AsisteID,
                     @PersonaID = @InnerPersonaID,
@@ -475,17 +397,15 @@ BEGIN
 
                 FETCH NEXT FROM curMarcajes INTO @QueueID, @MarcajeID, @InnerPersonaID, @FechaEvento;
             END;
-
             CLOSE curMarcajes; DEALLOCATE curMarcajes;
 
             COMMIT TRANSACTION;
-            SET @InsertOK = 1;   -- habilita Fase 2
+            SET @InsertOK = 1;
 
         END TRY
         BEGIN CATCH
             IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
-
-            IF CURSOR_STATUS('local', 'curMarcajes') >= 0  CLOSE    curMarcajes;
+            IF CURSOR_STATUS('local', 'curMarcajes') >= 0  CLOSE      curMarcajes;
             IF CURSOR_STATUS('local', 'curMarcajes') >= -1 DEALLOCATE curMarcajes;
 
             SET @ErrMsg = ERROR_MESSAGE();
@@ -500,20 +420,15 @@ BEGIN
                   AND TipoMov                      = @GrpTipoMov
             );
         END CATCH;
-        END;  -- cierra IF @CancelOK
+        END;  -- IF @CancelOK
 
         -- ==================================================================
-        -- FASE 2: spAfectar (sin transacción activa).
-        --         Solo se ejecuta si la Fase 1 completó correctamente.
-        --         Si spAfectar falla, se cancela el Asiste ya commiteado y
-        --         el grupo queda en Estatus=3 para reintento.
+        -- FASE 2: spAfectar (sin transacción).
+        --         Si falla: NO cancela, deja borrador con error en Observaciones.
         -- ==================================================================
         IF @InsertOK = 1
         BEGIN
             BEGIN TRY
-                -- 4c. Afectar — genera MovID y cambia Estatus a 'PROCESAR'.
-                --     Sin @ensilencio para que errores internos propaguen al CATCH
-                --     y queden registrados en UltimoError (diagnóstico).
                 SET @SQL = N'
                     EXEC [' + @GrpDB + N'].dbo.spAfectar
                         ''ASIS'', @AsisteID, ''AFECTAR'', ''Todo'',
@@ -521,7 +436,6 @@ BEGIN
                         @Estacion = 1;';
                 EXEC sp_executesql @SQL, N'@AsisteID INT', @AsisteID = @AsisteID;
 
-                -- 4d. Validar MovID — con @ensilencio=1 los fallos son silenciosos
                 SET @MovIDPost = NULL;
                 SET @SQL = N'SELECT @MovIDPost = MovID FROM [' + @GrpDB + N'].dbo.Asiste WHERE ID = @AsisteID;';
                 EXEC sp_executesql @SQL,
@@ -532,7 +446,7 @@ BEGIN
                 IF @MovIDPost IS NULL
                     RAISERROR(N'spAfectar no generó MovID para Asiste.ID=%d.', 16, 1, @AsisteID);
 
-                -- 4e. Marcar grupo como Hecho + actualizar AsistenciaMarcaje
+                -- Éxito: marcar cola Hecho
                 UPDATE dbo.MarcajeDispatchQueue
                 SET Estatus      = 2,
                     AsisteID     = @AsisteID,
@@ -555,7 +469,6 @@ BEGIN
                       AND TipoMov                      = @GrpTipoMov
                 );
 
-                -- Apuntar registros del Asiste cancelado al nuevo AsisteID
                 IF @ExistingAsisteID IS NOT NULL
                 BEGIN
                     UPDATE dbo.MarcajeDispatchQueue
@@ -567,9 +480,7 @@ BEGIN
 
             END TRY
             BEGIN CATCH
-                -- spAfectar lanzó excepción o no generó MovID:
-                -- NO cancelar el Asiste. Dejarlo como borrador (SINAFECTAR) y
-                -- registrar el error en Asiste.Observaciones para inspección manual.
+                -- Fallo Fase 2: NO cancelar. Dejar como borrador + error en Observaciones.
                 SET @ErrMsg = ERROR_MESSAGE();
 
                 BEGIN TRY
@@ -586,13 +497,12 @@ BEGIN
                         @ErrMsg   = @ErrMsg;
                 END TRY
                 BEGIN CATCH
-                    -- Si el UPDATE de Observaciones falla, al menos queda en UltimoError de la cola
-                    SET @ErrMsg = @ErrMsg + N' | UPDATE Observaciones también falló: ' + ERROR_MESSAGE();
+                    SET @ErrMsg = @ErrMsg + N' | UPDATE Observaciones falló: ' + ERROR_MESSAGE();
                 END CATCH;
 
                 UPDATE dbo.MarcajeDispatchQueue
                 SET Estatus      = 3,
-                    AsisteID     = @AsisteID,   -- conservar referencia al borrador para inspección
+                    AsisteID     = @AsisteID,
                     UltimoError  = LEFT(@ErrMsg, 4000),
                     UltimoCambio = SYSDATETIME()
                 WHERE MarcajeDispatchQueueID IN (
@@ -602,7 +512,7 @@ BEGIN
                       AND TipoMov                      = @GrpTipoMov
                 );
             END CATCH;
-        END; -- IF @InsertOK = 1
+        END;
 
         FETCH NEXT FROM curGrupos INTO
             @GrpDB, @GrpEmpresaID, @GrpCode, @GrpFecha, @GrpTipoMov;
@@ -611,4 +521,167 @@ BEGIN
     CLOSE curGrupos;
     DEALLOCATE curGrupos;
 END;
+GO
+
+PRINT '✓ SP dbo.sp_ProcessMarcajeQueue redesplegado (v2: no-cancel-on-error + validación duplicado)';
+GO
+
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- SECCIÓN B — LIMPIEZA en cotailordev: borrar Asistes CANCELADO hasta día 13
+-- ═════════════════════════════════════════════════════════════════════════════
+
+USE cotailordev;
+GO
+
+-- B.1 Snapshot antes
+PRINT '── Asistes a borrar (CANCELADO/sin MovID) hasta 2026-05-13 ──';
+SELECT a.FechaAplicacion, a.Mov, a.Estatus, a.MovID, COUNT(*) AS Total
+FROM dbo.Asiste a
+WHERE a.Usuario        = 'INTELISIS'
+  AND a.Mov            IN ('Entrada','SalidaComida','Entradacomida','Salida')
+  AND a.FechaAplicacion <= '20260513'
+  AND a.MovID          IS NULL
+GROUP BY a.FechaAplicacion, a.Mov, a.Estatus, a.MovID
+ORDER BY a.FechaAplicacion, a.Mov;
+GO
+
+-- B.2 Borrar AsisteD primero (los renglones huérfanos)
+DELETE d
+FROM dbo.AsisteD d
+INNER JOIN dbo.Asiste a ON a.ID = d.ID
+WHERE a.Usuario        = 'INTELISIS'
+  AND a.Mov            IN ('Entrada','SalidaComida','Entradacomida','Salida')
+  AND a.FechaAplicacion <= '20260513'
+  AND a.MovID          IS NULL;   -- protege Asistes con MovID válido (Hechos)
+
+PRINT '✓ AsisteD borrados';
+
+-- B.3 Borrar Asiste
+DELETE FROM dbo.Asiste
+WHERE Usuario        = 'INTELISIS'
+  AND Mov            IN ('Entrada','SalidaComida','Entradacomida','Salida')
+  AND FechaAplicacion <= '20260513'
+  AND MovID          IS NULL;
+
+PRINT '✓ Asistes borrados';
+GO
+
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- SECCIÓN C — RESET cola para reproceso (días <= 2026-05-13)
+-- ═════════════════════════════════════════════════════════════════════════════
+
+USE Checador;
+GO
+
+-- C.1 Limpiar referencias colgadas (AsisteID que ya no existe)
+UPDATE dbo.MarcajeDispatchQueue
+SET Estatus      = 0,
+    Intentos     = 0,
+    UltimoError  = NULL,
+    AsisteID     = NULL,
+    ProcesadoEn  = NULL,
+    UltimoCambio = SYSDATETIME()
+WHERE BaseDatos = N'cotailordev'
+  AND CAST(EventoFechaHora AS DATE) <= '20260513'
+  AND Estatus IN (1, 3);   -- Procesando colgado + Error reintentable
+PRINT '✓ Cola reseteada (Estatus 1,3 → 0)';
+GO
+
+-- C.2 (Opcional) — Si quieres re-procesar también Descartados de zona gris/excedente,
+--     descomenta. Por defecto se respetan los Descartados ya marcados.
+-- UPDATE dbo.MarcajeDispatchQueue
+-- SET Estatus = 0, Intentos = 0, UltimoError = NULL, AsisteID = NULL,
+--     ProcesadoEn = NULL, UltimoCambio = SYSDATETIME()
+-- WHERE BaseDatos = N'cotailordev'
+--   AND CAST(EventoFechaHora AS DATE) <= '20260513'
+--   AND Estatus = 4;
+
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- SECCIÓN D — EJECUTAR sp_ProcessMarcajeQueue
+-- ═════════════════════════════════════════════════════════════════════════════
+
+PRINT '── Ejecutando sp_ProcessMarcajeQueue (todas las ventanas) ──';
+EXEC dbo.sp_ProcessMarcajeQueue @TipoCorte = NULL, @BatchSize = 1000;
+PRINT '✓ Procesamiento completado';
+GO
+
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- SECCIÓN E — VERIFICACIÓN
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- E.1 Estado cola por día
+PRINT '── Cola por día y estatus ──';
+SELECT
+    CAST(EventoFechaHora AS DATE) AS Fecha,
+    Estatus,
+    CASE Estatus
+        WHEN 0 THEN 'Pendiente'
+        WHEN 1 THEN 'Procesando'
+        WHEN 2 THEN 'Hecho'
+        WHEN 3 THEN 'Error'
+        WHEN 4 THEN 'Descartado'
+    END AS EstatusDesc,
+    COUNT(*) AS Total
+FROM dbo.MarcajeDispatchQueue
+WHERE BaseDatos = N'cotailordev'
+  AND CAST(EventoFechaHora AS DATE) <= '20260513'
+GROUP BY CAST(EventoFechaHora AS DATE), Estatus
+ORDER BY Fecha, Estatus;
+
+-- E.2 Movimientos generados (incluye borradores con error)
+PRINT '── Movimientos en ERP cotailordev hasta 2026-05-13 ──';
+SELECT
+    a.FechaAplicacion AS Fecha,
+    a.Mov,
+    a.Estatus,
+    a.MovID,
+    a.ID AS AsisteID,
+    LEFT(a.Observaciones, 200) AS Observaciones,
+    (SELECT COUNT(*) FROM cotailordev.dbo.AsisteD d WHERE d.ID = a.ID) AS Renglones
+FROM cotailordev.dbo.Asiste a
+WHERE a.Usuario        = 'INTELISIS'
+  AND a.Mov            IN ('Entrada','SalidaComida','Entradacomida','Salida')
+  AND a.FechaAplicacion <= '20260513'
+ORDER BY a.FechaAplicacion, a.Mov;
+
+-- E.3 Validar regla 1-por-tipo-por-día (debe regresar 0 filas)
+PRINT '── Validación: ningún (Fecha, Mov) debe tener > 1 Asiste activo ──';
+SELECT
+    a.FechaAplicacion AS Fecha,
+    a.Mov,
+    COUNT(*) AS Activos
+FROM cotailordev.dbo.Asiste a
+WHERE a.Usuario        = 'INTELISIS'
+  AND a.Mov            IN ('Entrada','SalidaComida','Entradacomida','Salida')
+  AND a.FechaAplicacion <= '20260513'
+  AND a.Estatus        NOT IN ('CANCELADO','CANCELAR')
+GROUP BY a.FechaAplicacion, a.Mov
+HAVING COUNT(*) > 1;
+
+-- E.4 Errores residuales (borradores con problema)
+PRINT '── Borradores con error (Asiste SINAFECTAR + Observaciones llena) ──';
+SELECT
+    a.FechaAplicacion AS Fecha,
+    a.Mov,
+    a.ID AS AsisteID,
+    LEFT(a.Observaciones, 250) AS Error
+FROM cotailordev.dbo.Asiste a
+WHERE a.Usuario        = 'INTELISIS'
+  AND a.Mov            IN ('Entrada','SalidaComida','Entradacomida','Salida')
+  AND a.FechaAplicacion <= '20260513'
+  AND a.MovID          IS NULL
+  AND a.Estatus         NOT IN ('CANCELADO','CANCELAR')
+  AND a.Observaciones  IS NOT NULL
+ORDER BY a.FechaAplicacion, a.Mov;
+GO
+
+PRINT '════════════════════════════════════════════════════════════════════════════';
+PRINT '  Replay terminado.';
+PRINT '  - Si E.3 está vacío → regla 1-por-tipo-por-día OK.';
+PRINT '  - Si E.4 muestra filas → revisar Observaciones del Asiste para diagnosticar.';
+PRINT '════════════════════════════════════════════════════════════════════════════';
 GO
